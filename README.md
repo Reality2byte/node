@@ -317,6 +317,8 @@ For information about the governance of the Node.js project, see
   **Kohei Ueno** <<kohei.ueno119@gmail.com>> (he/him)
 * [daeyeon](https://github.com/daeyeon) -
   **Daeyeon Jeong** <<daeyeon.dev@gmail.com>> (he/him)
+* [dario-piotrowicz](https://github.com/dario-piotrowicz) -
+  **Dario Piotrowicz** <<dario.piotrowicz@gmail.com>> (he/him)
 * [debadree25](https://github.com/debadree25) -
   **Debadree Chatterjee** <<debadree333@gmail.com>> (he/him)
 * [deokjinkim](https://github.com/deokjinkim) -
@@ -753,6 +755,8 @@ maintaining the Node.js project.
   **Gireesh Punathil** <<gpunathi@in.ibm.com>> (he/him)
 * [gurgunday](https://github.com/gurgunday) -
   **Gürgün Dayıoğlu** <<hey@gurgun.day>>
+* [HBSPS](https://github.com/HBSPS) -
+  **Wiyeong Seo** <<hbsps.dev@gmail.com>>
 * [iam-frankqiu](https://github.com/iam-frankqiu) -
   **Frank Qiu** <<iam.frankqiu@gmail.com>> (he/him)
 * [KevinEady](https://github.com/KevinEady) -

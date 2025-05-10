@@ -400,7 +400,7 @@ The test runner will continue to run until the process is terminated.
 ## Global setup and teardown
 
 <!-- YAML
-added: REPLACEME
+added: v24.0.0
 -->
 
 > Stability: 1.0 - Early development
@@ -472,9 +472,12 @@ By default, Node.js will run all files matching these patterns:
 Unless [`--no-experimental-strip-types`][] is supplied, the following
 additional patterns are also matched:
 
-* `**/test/**/*-test.{cts,mts,ts}`
-* `**/test/**/*.test.{cts,mts,ts}`
-* `**/test/**/*_test.{cts,mts,ts}`
+* `**/*.test.{cts,mts,ts}`
+* `**/*-test.{cts,mts,ts}`
+* `**/*_test.{cts,mts,ts}`
+* `**/test-*.{cts,mts,ts}`
+* `**/test.{cts,mts,ts}`
+* `**/test/**/*.{cts,mts,ts}`
 
 Alternatively, one or more glob patterns can be provided as the
 final argument(s) to the Node.js command, as shown below.
@@ -1455,7 +1458,7 @@ added:
   - v20.13.0
 changes:
   - version:
-    - REPLACEME
+    - v24.0.0
     pr-url: https://github.com/nodejs/node/pull/56664
     description: This function no longer returns a `Promise`.
 -->
@@ -1512,7 +1515,7 @@ added:
   - v16.17.0
 changes:
   - version:
-    - REPLACEME
+    - v24.0.0
     pr-url: https://github.com/nodejs/node/pull/56664
     description: This function no longer returns a `Promise`.
   - version:
@@ -2168,6 +2171,11 @@ test('spies on an object method', (t) => {
 added:
   - v22.3.0
   - v20.18.0
+changes:
+  - version:
+    - v24.0.0
+    pr-url: https://github.com/nodejs/node/pull/58007
+    description: Support JSON modules.
 -->
 
 > Stability: 1.0 - Early development
@@ -2191,10 +2199,10 @@ added:
     mock will throw an exception when used as a CJS or builtin module.
 * Returns: {MockModuleContext} An object that can be used to manipulate the mock.
 
-This function is used to mock the exports of ECMAScript modules, CommonJS
-modules, and Node.js builtin modules. Any references to the original module
-prior to mocking are not impacted. In order to enable module mocking, Node.js must
-be started with the [`--experimental-test-module-mocks`][] command-line flag.
+This function is used to mock the exports of ECMAScript modules, CommonJS modules, JSON modules, and
+Node.js builtin modules. Any references to the original module prior to mocking are not impacted. In
+order to enable module mocking, Node.js must be started with the
+[`--experimental-test-module-mocks`][] command-line flag.
 
 The following example demonstrates how a mock is created for a module.
 
@@ -3611,7 +3619,7 @@ added:
   - v16.17.0
 changes:
   - version:
-    - REPLACEME
+    - v24.0.0
     pr-url: https://github.com/nodejs/node/pull/56664
     description: This function no longer returns a `Promise`.
   - version:
