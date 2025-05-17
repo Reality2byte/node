@@ -277,7 +277,7 @@ shared_optgroup.add_argument('--shared-http-parser-includes',
 shared_optgroup.add_argument('--shared-http-parser-libname',
     action='store',
     dest='shared_http_parser_libname',
-    default='http_parser',
+    default='llhttp',
     help='alternative lib name to link to [default: %(default)s]')
 
 shared_optgroup.add_argument('--shared-http-parser-libpath',
@@ -640,12 +640,6 @@ parser.add_argument('--experimental-enable-pointer-compression',
     default=None,
     help='[Experimental] Enable V8 pointer compression (limits max heap to 4GB and breaks ABI compatibility)')
 
-parser.add_argument('--disable-shared-readonly-heap',
-    action='store_true',
-    dest='disable_shared_ro_heap',
-    default=None,
-    help='Disable the shared read-only heap feature in V8')
-
 parser.add_argument('--v8-options',
     action='store',
     dest='v8_options',
@@ -869,6 +863,12 @@ parser.add_argument('--without-node-options',
     dest='without_node_options',
     default=None,
     help='build without NODE_OPTIONS support')
+
+parser.add_argument('--without-sqlite',
+    action='store_true',
+    dest='without_sqlite',
+    default=None,
+    help='build without SQLite (disables SQLite and Web Stoage API)')
 
 parser.add_argument('--ninja',
     action='store_true',
@@ -1720,7 +1720,6 @@ def configure_v8(o, configs):
   o['variables']['v8_enable_pointer_compression'] = 1 if options.enable_pointer_compression else 0
   o['variables']['v8_enable_sandbox'] = 1 if options.enable_pointer_compression else 0
   o['variables']['v8_enable_31bit_smis_on_64bit_arch'] = 1 if options.enable_pointer_compression else 0
-  o['variables']['v8_enable_shared_ro_heap'] = 0 if options.enable_pointer_compression or options.disable_shared_ro_heap else 1
   o['variables']['v8_enable_extensible_ro_snapshot'] = 0
   o['variables']['v8_trace_maps'] = 1 if options.trace_maps else 0
   o['variables']['node_use_v8_platform'] = b(not options.without_v8_platform)
@@ -1823,6 +1822,16 @@ def configure_openssl(o):
 
   configure_library('openssl', o)
 
+def configure_sqlite(o):
+  o['variables']['node_use_sqlite'] = b(not options.without_sqlite)
+  if options.without_sqlite:
+    def without_sqlite_error(option):
+      error(f'--without-sqlite is incompatible with {option}')
+    if options.shared_sqlite:
+      without_sqlite_error('--shared-sqlite')
+    return
+
+  configure_library('sqlite', o, pkgname='sqlite3')
 
 def configure_static(o):
   if options.fully_static or options.partly_static:
@@ -2256,7 +2265,7 @@ configure_node_lib_files(output)
 configure_node_cctest_sources(output)
 configure_napi(output)
 configure_library('zlib', output)
-configure_library('http_parser', output)
+configure_library('http_parser', output, pkgname='libllhttp')
 configure_library('libuv', output)
 configure_library('ada', output)
 configure_library('simdjson', output)
@@ -2266,9 +2275,9 @@ configure_library('cares', output, pkgname='libcares')
 configure_library('nghttp2', output, pkgname='libnghttp2')
 configure_library('nghttp3', output, pkgname='libnghttp3')
 configure_library('ngtcp2', output, pkgname='libngtcp2')
-configure_library('sqlite', output, pkgname='sqlite3')
-configure_library('uvwasi', output, pkgname='libuvwasi')
-configure_library('zstd', output)
+configure_sqlite(output);
+configure_library('uvwasi', output)
+configure_library('zstd', output, pkgname='libzstd')
 configure_v8(output, configurations)
 configure_openssl(output)
 configure_intl(output)

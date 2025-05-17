@@ -1205,6 +1205,17 @@ added: v22.4.0
 
 Enable experimental [`Web Storage`][] support.
 
+### `--experimental-worker-inspection`
+
+<!-- YAML
+added:
+  - REPLACEME
+-->
+
+> Stability: 1.1 - Active Development
+
+Enable experimental support for the worker inspection with Chrome DevTools.
+
 ### `--expose-gc`
 
 <!-- YAML
@@ -1457,12 +1468,21 @@ forked processes, or clustered processes.
 
 <!-- YAML
 added: v12.0.0
+changes:
+  - version: v23.6.0
+    pr-url: https://github.com/nodejs/node/pull/56350
+    description: Add support for `-typescript` values.
+  - version:
+    - v22.7.0
+    - v20.19.0
+    pr-url: https://github.com/nodejs/node/pull/53619
+    description: ESM syntax detection is enabled by default.
 -->
 
 This configures Node.js to interpret `--eval` or `STDIN` input as CommonJS or
 as an ES module. Valid values are `"commonjs"`, `"module"`, `"module-typescript"` and `"commonjs-typescript"`.
 The `"-typescript"` values are not available with the flag `--no-experimental-strip-types`.
-The default is `"commonjs"`.
+The default is no value, or `"commonjs"` if `--no-experimental-detect-module` is passed.
 
 If `--input-type` is not provided,
 Node.js will try to detect the syntax with the following steps:
@@ -1673,7 +1693,7 @@ requiring a native C++ addon will fail and throw an exception.
 ### `--no-async-context-frame`
 
 <!-- YAML
-added: REPLACEME
+added: v24.0.0
 -->
 
 Disables the use of [`AsyncLocalStorage`][] backed by `AsyncContextFrame` and
@@ -2455,7 +2475,7 @@ finished executing even if the event loop would otherwise remain active.
 ### `--test-global-setup=module`
 
 <!-- YAML
-added: REPLACEME
+added: v24.0.0
 -->
 
 > Stability: 1.0 - Early development
@@ -3111,8 +3131,7 @@ node --watch --watch-preserve-output test.js
 added: v6.0.0
 -->
 
-Automatically zero-fills all newly allocated [`Buffer`][] and [`SlowBuffer`][]
-instances.
+Automatically zero-fills all newly allocated [`Buffer`][] instances.
 
 ## Environment variables
 
@@ -3540,7 +3559,7 @@ variable is strongly discouraged.
 ### `NODE_USE_ENV_PROXY=1`
 
 <!-- YAML
-added: REPLACEME
+added: v24.0.0
 -->
 
 > Stability: 1.1 - Active Development
@@ -3887,7 +3906,6 @@ node --stack-trace-limit=12 -p -e "Error.stackTraceLimit" # prints 12
 [`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`]: errors.md#err_unsupported_typescript_syntax
 [`NODE_OPTIONS`]: #node_optionsoptions
 [`NO_COLOR`]: https://no-color.org
-[`SlowBuffer`]: buffer.md#class-slowbuffer
 [`Web Storage`]: https://developer.mozilla.org/en-US/docs/Web/API/Web_Storage_API
 [`WebSocket`]: https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
 [`YoungGenerationSizeFromSemiSpaceSize`]: https://chromium.googlesource.com/v8/v8.git/+/refs/tags/10.3.129/src/heap/heap.cc#328
