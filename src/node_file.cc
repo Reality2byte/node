@@ -23,6 +23,7 @@
 #include "aliased_buffer-inl.h"
 #include "memory_tracker-inl.h"
 #include "node_buffer.h"
+#include "node_debug.h"
 #include "node_errors.h"
 #include "node_external_reference.h"
 #include "node_file-inl.h"
@@ -42,6 +43,7 @@
 #include "uv.h"
 #include "v8-fast-api-calls.h"
 
+#include <cstdio>
 #include <filesystem>
 
 #if defined(__MINGW32__) || defined(_MSC_VER)
@@ -63,8 +65,6 @@ using v8::BigInt;
 using v8::Context;
 using v8::EscapableHandleScope;
 using v8::FastApiCallbackOptions;
-using v8::FastOneByteString;
-using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
 using v8::HandleScope;
@@ -1056,9 +1056,9 @@ static void ExistsSync(const FunctionCallbackInfo<Value>& args) {
 static void InternalModuleStat(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
 
-  CHECK_GE(args.Length(), 2);
-  CHECK(args[1]->IsString());
-  BufferValue path(env->isolate(), args[1]);
+  CHECK_EQ(args.Length(), 1);
+  CHECK(args[0]->IsString());
+  BufferValue path(env->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
   ToNamespacedPath(env, &path);
 
@@ -1074,15 +1074,17 @@ static void InternalModuleStat(const FunctionCallbackInfo<Value>& args) {
 }
 
 static int32_t FastInternalModuleStat(
-    Local<Object> unused,
-    Local<Object> recv,
-    const FastOneByteString& input,
+    Local<Value> recv,
+    Local<Value> input_,
     // NOLINTNEXTLINE(runtime/references) This is V8 api.
     FastApiCallbackOptions& options) {
-  Environment* env = Environment::GetCurrent(options.isolate);
-  HandleScope scope(env->isolate());
+  TRACK_V8_FAST_API_CALL("fs.internalModuleStat");
+  HandleScope scope(options.isolate);
 
-  auto path = std::filesystem::path(input.data, input.data + input.length);
+  CHECK(input_->IsString());
+  Utf8Value input(options.isolate, input_.As<String>());
+
+  auto path = std::filesystem::path(input.ToStringView());
 
   switch (std::filesystem::status(path).type()) {
     case std::filesystem::file_type::directory:
@@ -3349,6 +3351,72 @@ static void CpSyncCheckPaths(const FunctionCallbackInfo<Value>& args) {
   }
 }
 
+static void CpSyncOverrideFile(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  Isolate* isolate = env->isolate();
+
+  CHECK_EQ(args.Length(), 4);  // src, dest, mode, preserveTimestamps
+
+  BufferValue src(isolate, args[0]);
+  CHECK_NOT_NULL(*src);
+  ToNamespacedPath(env, &src);
+
+  BufferValue dest(isolate, args[1]);
+  CHECK_NOT_NULL(*dest);
+  ToNamespacedPath(env, &dest);
+
+  int mode;
+  if (!GetValidFileMode(env, args[2], UV_FS_COPYFILE).To(&mode)) {
+    return;
+  }
+
+  bool preserve_timestamps = args[3]->IsTrue();
+
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemRead, src.ToStringView());
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemWrite, dest.ToStringView());
+
+  std::error_code error;
+
+  if (!std::filesystem::remove(*dest, error)) {
+    return env->ThrowStdErrException(error, "unlink", *dest);
+  }
+
+  if (mode == 0) {
+    // if no mode is specified use the faster std::filesystem API
+    if (!std::filesystem::copy_file(*src, *dest, error)) {
+      return env->ThrowStdErrException(error, "cp", *dest);
+    }
+  } else {
+    uv_fs_t req;
+    auto cleanup = OnScopeLeave([&req]() { uv_fs_req_cleanup(&req); });
+    auto result = uv_fs_copyfile(nullptr, &req, *src, *dest, mode, nullptr);
+    if (is_uv_error(result)) {
+      return env->ThrowUVException(result, "cp", nullptr, *src, *dest);
+    }
+  }
+
+  if (preserve_timestamps) {
+    uv_fs_t req;
+    auto cleanup = OnScopeLeave([&req]() { uv_fs_req_cleanup(&req); });
+    int result = uv_fs_stat(nullptr, &req, *src, nullptr);
+    if (is_uv_error(result)) {
+      return env->ThrowUVException(result, "stat", nullptr, *src);
+    }
+
+    const uv_stat_t* const s = static_cast<const uv_stat_t*>(req.ptr);
+    const double source_atime = s->st_atim.tv_sec + s->st_atim.tv_nsec / 1e9;
+    const double source_mtime = s->st_mtim.tv_sec + s->st_mtim.tv_nsec / 1e9;
+
+    int utime_result =
+        uv_fs_utime(nullptr, &req, *dest, source_atime, source_mtime, nullptr);
+    if (is_uv_error(utime_result)) {
+      return env->ThrowUVException(utime_result, "utime", nullptr, *dest);
+    }
+  }
+}
+
 BindingData::FilePathIsFileReturnType BindingData::FilePathIsFile(
     Environment* env, const std::string& file_path) {
   THROW_IF_INSUFFICIENT_PERMISSIONS(
@@ -3688,6 +3756,7 @@ static void CreatePerIsolateProperties(IsolateData* isolate_data,
   SetMethod(isolate, target, "mkdtemp", Mkdtemp);
 
   SetMethod(isolate, target, "cpSyncCheckPaths", CpSyncCheckPaths);
+  SetMethod(isolate, target, "cpSyncOverrideFile", CpSyncOverrideFile);
 
   StatWatcher::CreatePerIsolateProperties(isolate_data, target);
   BindingData::CreatePerIsolateProperties(isolate_data, target);
@@ -3800,6 +3869,7 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(CopyFile);
 
   registry->Register(CpSyncCheckPaths);
+  registry->Register(CpSyncOverrideFile);
 
   registry->Register(Chmod);
   registry->Register(FChmod);

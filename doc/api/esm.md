@@ -350,12 +350,17 @@ properties. It is only supported in ES modules.
 added:
   - v21.2.0
   - v20.11.0
+changes:
+  - version:
+     - v24.0.0
+     - v22.16.0
+    pr-url: https://github.com/nodejs/node/pull/58011
+    description: This property is no longer experimental.
 -->
 
-> Stability: 1.2 - Release candidate
+* {string} The directory name of the current module.
 
-* {string} The directory name of the current module. This is the same as the
-  [`path.dirname()`][] of the [`import.meta.filename`][].
+This is the same as the [`path.dirname()`][] of the [`import.meta.filename`][].
 
 > **Caveat**: only present on `file:` modules.
 
@@ -365,14 +370,18 @@ added:
 added:
   - v21.2.0
   - v20.11.0
+changes:
+  - version:
+     - v24.0.0
+     - v22.16.0
+    pr-url: https://github.com/nodejs/node/pull/58011
+    description: This property is no longer experimental.
 -->
-
-> Stability: 1.2 - Release candidate
 
 * {string} The full absolute path and filename of the current module, with
   symlinks resolved.
-* This is the same as the [`url.fileURLToPath()`][] of the
-  [`import.meta.url`][].
+
+This is the same as the [`url.fileURLToPath()`][] of the [`import.meta.url`][].
 
 > **Caveat** only local modules support this property. Modules not using the
 > `file:` protocol will not provide it.
@@ -692,7 +701,7 @@ would provide the exports interface for the instantiation of `library.wasm`.
 ### Wasm Source Phase Imports
 
 <!-- YAML
-added: REPLACEME
+added: v24.0.0
 -->
 
 The [Source Phase Imports][] proposal allows the `import source` keyword
@@ -708,13 +717,18 @@ into a new instance of `library.wasm`:
 ```js
 import source libraryModule from './library.wasm';
 
-const instance1 = await WebAssembly.instantiate(libraryModule, {
-  custom: import1,
-});
+const instance1 = await WebAssembly.instantiate(libraryModule, importObject1);
 
-const instance2 = await WebAssembly.instantiate(libraryModule, {
-  custom: import2,
-});
+const instance2 = await WebAssembly.instantiate(libraryModule, importObject2);
+```
+
+In addition to the static source phase, there is also a dynamic variant of the
+source phase via the `import.source` dynamic phase import syntax:
+
+```js
+const dynamicLibrary = await import.source('./library.wasm');
+
+const instance = await WebAssembly.instantiate(dynamicLibrary, importObject);
 ```
 
 <i id="esm_experimental_top_level_await"></i>

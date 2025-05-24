@@ -2395,7 +2395,9 @@ of an asynchronous operation.
 ### `ERR_OPTIONS_BEFORE_BOOTSTRAPPING`
 
 <!-- YAML
-added: v23.10.0
+added:
+ - v23.10.0
+ - v22.16.0
 -->
 
 An attempt was made to get options before the bootstrapping was completed.
@@ -2747,7 +2749,7 @@ A file imported from a source map was not found.
 ### `ERR_SOURCE_PHASE_NOT_DEFINED`
 
 <!-- YAML
-added: REPLACEME
+added: v24.0.0
 -->
 
 The provided module import does not provide a source phase imports representation for source phase

@@ -712,9 +712,11 @@ void ResetStdio() {
       while (err == -1 && errno == EINTR);  // NOLINT
       CHECK_EQ(0, pthread_sigmask(SIG_UNBLOCK, &sa, nullptr));
 
-      // Normally we expect err == 0. But if macOS App Sandbox is enabled,
-      // tcsetattr will fail with err == -1 and errno == EPERM.
-      CHECK_IMPLIES(err != 0, err == -1 && errno == EPERM);
+      // We don't check the return value of tcsetattr() because it can fail
+      // for a number of reasons, none that we can do anything about. Examples:
+      // - if macOS App Sandbox is enabled, tcsetattr fails with EPERM
+      // - if the process group is orphaned, e.g. because the user logged out,
+      //   tcsetattr fails with EIO
     }
   }
 #endif  // __POSIX__
@@ -1211,6 +1213,14 @@ InitializeOncePerProcessInternal(const std::vector<std::string>& args,
     result->platform_ = per_process::v8_platform.Platform();
   }
 
+  if (!(flags & ProcessInitializationFlags::kNoInitializeCppgc)) {
+    v8::PageAllocator* allocator = nullptr;
+    if (result->platform_ != nullptr) {
+      allocator = result->platform_->GetPageAllocator();
+    }
+    cppgc::InitializeProcess(allocator);
+  }
+
   if (!(flags & ProcessInitializationFlags::kNoInitializeV8)) {
     V8::Initialize();
 
@@ -1218,14 +1228,6 @@ InitializeOncePerProcessInternal(const std::vector<std::string>& args,
     // TODO(legendecas): Replace this global disablement with case suppressions.
     // https://github.com/nodejs/node-v8/issues/301
     absl::SetMutexDeadlockDetectionMode(absl::OnDeadlockCycle::kIgnore);
-  }
-
-  if (!(flags & ProcessInitializationFlags::kNoInitializeCppgc)) {
-    v8::PageAllocator* allocator = nullptr;
-    if (result->platform_ != nullptr) {
-      allocator = result->platform_->GetPageAllocator();
-    }
-    cppgc::InitializeProcess(allocator);
   }
 
 #if NODE_USE_V8_WASM_TRAP_HANDLER
