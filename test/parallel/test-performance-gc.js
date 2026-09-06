@@ -11,6 +11,7 @@ const {
 const {
   NODE_PERFORMANCE_GC_MAJOR,
   NODE_PERFORMANCE_GC_MINOR,
+  NODE_PERFORMANCE_GC_MINOR_MARK_SWEEP,
   NODE_PERFORMANCE_GC_INCREMENTAL,
   NODE_PERFORMANCE_GC_WEAKCB,
   NODE_PERFORMANCE_GC_FLAGS_FORCED
@@ -19,6 +20,7 @@ const {
 const kinds = [
   NODE_PERFORMANCE_GC_MAJOR,
   NODE_PERFORMANCE_GC_MINOR,
+  NODE_PERFORMANCE_GC_MINOR_MARK_SWEEP,
   NODE_PERFORMANCE_GC_INCREMENTAL,
   NODE_PERFORMANCE_GC_WEAKCB,
 ];
@@ -46,9 +48,9 @@ const kinds = [
 // GC should not keep the event loop alive
 {
   let didCall = false;
-  process.on('beforeExit', () => {
+  process.on('beforeExit', common.mustCall(() => {
     assert(!didCall);
     didCall = true;
     globalThis.gc();
-  });
+  }));
 }

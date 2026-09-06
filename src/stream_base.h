@@ -37,7 +37,7 @@ class StreamReq {
   // BaseObject, and the slots are used for the identical purpose.
   enum InternalFields {
     kSlot = BaseObject::kSlot,
-    kStreamReqField = BaseObject::kInternalFieldCount,
+    kStreamReqField = AsyncWrap::kInternalFieldCount,
     kInternalFieldCount
   };
 
@@ -310,7 +310,7 @@ class StreamBase : public StreamResource {
   // BaseObject (it's possible for it not to, however).
   enum InternalFields {
     kSlot = BaseObject::kSlot,
-    kStreamBaseField = BaseObject::kInternalFieldCount,
+    kStreamBaseField = AsyncWrap::kInternalFieldCount,
     kOnReadFunctionField,
     kInternalFieldCount
   };
@@ -432,14 +432,18 @@ class StreamBase : public StreamResource {
   friend class Environment;  // For kNumStreamBaseStateFields.
 };
 
-
 // These are helpers for creating `ShutdownWrap`/`WriteWrap` instances.
 // `OtherBase` must have a constructor that matches the `AsyncWrap`
-// constructors’s (Environment*, Local<Object>, AsyncWrap::Provider) signature
+// constructors's (Environment*, Local<Object>, AsyncWrap::Provider) signature
 // and be a subclass of `AsyncWrap`.
-template <typename OtherBase>
+template <std::derived_from<AsyncWrap> OtherBase>
 class SimpleShutdownWrap : public ShutdownWrap, public OtherBase {
  public:
+  enum InternalFields {
+    kInternalFieldCount = std::max<uint32_t>(ShutdownWrap::kInternalFieldCount,
+                                             OtherBase::kInternalFieldCount),
+  };
+
   SimpleShutdownWrap(StreamBase* stream,
                      v8::Local<v8::Object> req_wrap_obj);
 
@@ -454,9 +458,14 @@ class SimpleShutdownWrap : public ShutdownWrap, public OtherBase {
   }
 };
 
-template <typename OtherBase>
+template <std::derived_from<AsyncWrap> OtherBase>
 class SimpleWriteWrap : public WriteWrap, public OtherBase {
  public:
+  enum InternalFields {
+    kInternalFieldCount = std::max<uint32_t>(WriteWrap::kInternalFieldCount,
+                                             OtherBase::kInternalFieldCount),
+  };
+
   SimpleWriteWrap(StreamBase* stream,
                   v8::Local<v8::Object> req_wrap_obj);
 

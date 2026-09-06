@@ -14,6 +14,7 @@
 #include "node_blob.h"
 #include "node_builtins.h"
 #include "node_contextify.h"
+#include "node_diagnostics_channel.h"
 #include "node_errors.h"
 #include "node_external_reference.h"
 #include "node_file.h"
@@ -154,9 +155,8 @@ class SnapshotDeserializer : public BlobDeserializer<SnapshotDeserializer> {
                 DebugCategory::SNAPSHOT_SERDES),
             v) {}
 
-  template <typename T,
-            std::enable_if_t<!std::is_same<T, std::string>::value>* = nullptr,
-            std::enable_if_t<!std::is_arithmetic<T>::value>* = nullptr>
+  template <typename T>
+    requires(!std::is_arithmetic_v<T> && !std::same_as<T, std::string>)
   T Read();
 };
 
@@ -171,9 +171,8 @@ class SnapshotSerializer : public BlobSerializer<SnapshotSerializer> {
     sink.reserve(4 * 1024 * 1024);
   }
 
-  template <typename T,
-            std::enable_if_t<!std::is_same<T, std::string>::value>* = nullptr,
-            std::enable_if_t<!std::is_arithmetic<T>::value>* = nullptr>
+  template <typename T>
+    requires(!std::is_arithmetic_v<T> && !std::same_as<T, std::string>)
   size_t Write(const T& data);
 };
 
@@ -225,7 +224,7 @@ builtins::CodeCacheInfo SnapshotDeserializer::Read() {
 
   if (is_debug) {
     std::string str = ToStr(result);
-    Debug("Read<builtins::CodeCacheInfo>() %s\n", str.c_str());
+    Debug("Read<builtins::CodeCacheInfo>() %s\n", str);
   }
   return result;
 }
@@ -234,7 +233,7 @@ template <>
 size_t SnapshotSerializer::Write(const builtins::CodeCacheInfo& info) {
   Debug("\nWrite<builtins::CodeCacheInfo>() id = %s"
         ", length=%d\n",
-        info.id.c_str(),
+        info.id,
         info.data.length);
 
   size_t written_total = WriteString(info.id);
@@ -263,7 +262,7 @@ PropInfo SnapshotDeserializer::Read() {
 
   if (is_debug) {
     std::string str = ToStr(result);
-    Debug("Read<PropInfo>() %s\n", str.c_str());
+    Debug("Read<PropInfo>() %s\n", str);
   }
 
   return result;
@@ -273,7 +272,7 @@ template <>
 size_t SnapshotSerializer::Write(const PropInfo& data) {
   if (is_debug) {
     std::string str = ToStr(data);
-    Debug("Write<PropInfo>() %s\n", str.c_str());
+    Debug("Write<PropInfo>() %s\n", str);
   }
 
   size_t written_total = WriteString(data.name);
@@ -305,7 +304,7 @@ AsyncHooks::SerializeInfo SnapshotDeserializer::Read() {
 
   if (is_debug) {
     std::string str = ToStr(result);
-    Debug("Read<AsyncHooks::SerializeInfo>() %s\n", str.c_str());
+    Debug("Read<AsyncHooks::SerializeInfo>() %s\n", str);
   }
 
   return result;
@@ -314,7 +313,7 @@ template <>
 size_t SnapshotSerializer::Write(const AsyncHooks::SerializeInfo& data) {
   if (is_debug) {
     std::string str = ToStr(data);
-    Debug("Write<AsyncHooks::SerializeInfo>() %s\n", str.c_str());
+    Debug("Write<AsyncHooks::SerializeInfo>() %s\n", str);
   }
 
   size_t written_total =
@@ -341,7 +340,7 @@ TickInfo::SerializeInfo SnapshotDeserializer::Read() {
 
   if (is_debug) {
     std::string str = ToStr(result);
-    Debug("Read<TickInfo::SerializeInfo>() %s\n", str.c_str());
+    Debug("Read<TickInfo::SerializeInfo>() %s\n", str);
   }
 
   return result;
@@ -351,7 +350,7 @@ template <>
 size_t SnapshotSerializer::Write(const TickInfo::SerializeInfo& data) {
   if (is_debug) {
     std::string str = ToStr(data);
-    Debug("Write<TickInfo::SerializeInfo>() %s\n", str.c_str());
+    Debug("Write<TickInfo::SerializeInfo>() %s\n", str);
   }
 
   size_t written_total = WriteArithmetic<AliasedBufferIndex>(data.fields);
@@ -370,7 +369,7 @@ ImmediateInfo::SerializeInfo SnapshotDeserializer::Read() {
   result.fields = ReadArithmetic<AliasedBufferIndex>();
   if (is_debug) {
     std::string str = ToStr(result);
-    Debug("Read<ImmediateInfo::SerializeInfo>() %s\n", str.c_str());
+    Debug("Read<ImmediateInfo::SerializeInfo>() %s\n", str);
   }
   return result;
 }
@@ -379,7 +378,7 @@ template <>
 size_t SnapshotSerializer::Write(const ImmediateInfo::SerializeInfo& data) {
   if (is_debug) {
     std::string str = ToStr(data);
-    Debug("Write<ImmediateInfo::SerializeInfo>() %s\n", str.c_str());
+    Debug("Write<ImmediateInfo::SerializeInfo>() %s\n", str);
   }
 
   size_t written_total = WriteArithmetic<AliasedBufferIndex>(data.fields);
@@ -403,7 +402,7 @@ performance::PerformanceState::SerializeInfo SnapshotDeserializer::Read() {
   result.observers = ReadArithmetic<AliasedBufferIndex>();
   if (is_debug) {
     std::string str = ToStr(result);
-    Debug("Read<PerformanceState::SerializeInfo>() %s\n", str.c_str());
+    Debug("Read<PerformanceState::SerializeInfo>() %s\n", str);
   }
   return result;
 }
@@ -413,7 +412,7 @@ size_t SnapshotSerializer::Write(
     const performance::PerformanceState::SerializeInfo& data) {
   if (is_debug) {
     std::string str = ToStr(data);
-    Debug("Write<PerformanceState::SerializeInfo>() %s\n", str.c_str());
+    Debug("Write<PerformanceState::SerializeInfo>() %s\n", str);
   }
 
   size_t written_total = WriteArithmetic<AliasedBufferIndex>(data.root);
@@ -439,7 +438,7 @@ IsolateDataSerializeInfo SnapshotDeserializer::Read() {
   result.template_values = ReadVector<PropInfo>();
   if (is_debug) {
     std::string str = ToStr(result);
-    Debug("Read<IsolateDataSerializeInfo>() %s\n", str.c_str());
+    Debug("Read<IsolateDataSerializeInfo>() %s\n", str);
   }
   return result;
 }
@@ -448,7 +447,7 @@ template <>
 size_t SnapshotSerializer::Write(const IsolateDataSerializeInfo& data) {
   if (is_debug) {
     std::string str = ToStr(data);
-    Debug("Write<IsolateDataSerializeInfo>() %s\n", str.c_str());
+    Debug("Write<IsolateDataSerializeInfo>() %s\n", str);
   }
 
   size_t written_total = WriteVector<SnapshotIndex>(data.primitive_values);
@@ -473,7 +472,7 @@ template <>
 size_t SnapshotSerializer::Write(const RealmSerializeInfo& data) {
   if (is_debug) {
     std::string str = ToStr(data);
-    Debug("\nWrite<RealmSerializeInfo>() %s\n", str.c_str());
+    Debug("\nWrite<RealmSerializeInfo>() %s\n", str);
   }
 
   // Use += here to ensure order of evaluation.
@@ -507,7 +506,7 @@ template <>
 size_t SnapshotSerializer::Write(const EnvSerializeInfo& data) {
   if (is_debug) {
     std::string str = ToStr(data);
-    Debug("\nWrite<EnvSerializeInfo>() %s\n", str.c_str());
+    Debug("\nWrite<EnvSerializeInfo>() %s\n", str);
   }
 
   // Use += here to ensure order of evaluation.
@@ -549,7 +548,7 @@ SnapshotMetadata SnapshotDeserializer::Read() {
 
   if (is_debug) {
     std::string str = ToStr(result);
-    Debug("Read<SnapshotMetadata>() %s\n", str.c_str());
+    Debug("Read<SnapshotMetadata>() %s\n", str);
   }
   return result;
 }
@@ -558,7 +557,7 @@ template <>
 size_t SnapshotSerializer::Write(const SnapshotMetadata& data) {
   if (is_debug) {
     std::string str = ToStr(data);
-    Debug("\nWrite<SnapshotMetadata>() %s\n", str.c_str());
+    Debug("\nWrite<SnapshotMetadata>() %s\n", str);
   }
   size_t written_total = 0;
   // We need the Node.js version, platform and arch to match because
@@ -566,7 +565,7 @@ size_t SnapshotSerializer::Write(const SnapshotMetadata& data) {
   // can be changed in semver-patches.
   Debug("Write snapshot type %d\n", static_cast<uint8_t>(data.type));
   written_total += WriteArithmetic<uint8_t>(static_cast<uint8_t>(data.type));
-  Debug("Write Node.js version %s\n", data.node_version.c_str());
+  Debug("Write Node.js version %s\n", data.node_version);
   written_total += WriteString(data.node_version);
   Debug("Write Node.js arch %s\n", data.node_arch);
   written_total += WriteString(data.node_arch);
@@ -732,13 +731,13 @@ static std::string FormatSize(size_t size) {
 }
 
 template <typename T>
+  requires(std::same_as<T, uint8_t> || std::same_as<T, char>)
 void WriteByteVectorLiteral(std::ostream* ss,
                             const T* vec,
                             size_t size,
                             const char* var_name,
                             bool use_array_literals) {
   constexpr bool is_uint8_t = std::is_same_v<T, uint8_t>;
-  static_assert(is_uint8_t || std::is_same_v<T, char>);
   constexpr const char* type_name = is_uint8_t ? "uint8_t" : "char";
   if (!use_array_literals) {
     const uint8_t* data = reinterpret_cast<const uint8_t*>(vec);
@@ -968,6 +967,61 @@ std::optional<SnapshotConfig> ReadSnapshotConfig(const char* config_path) {
   return result;
 }
 
+// Find bindings that have been loaded by internalBinding() but the external
+// reference method have not been called. This requires that the caller
+// match the id passed into their NODE_BINDING_CONTEXT_AWARE_INTERNAL() and
+// NODE_BINDING_EXTERNAL_REFERENCE() calls. Note that this only serves as a
+// preemptive check. Binding methods create the actual external references
+// (usually through function templates) and there's currently no easy way
+// to verify at that level of granularity. See "Registering binding functions
+// used in bootstrap" in src/README.md.
+bool ValidateBindings(Environment* env) {
+  std::set<std::string> registered;
+#define V(modname) registered.insert(#modname);
+  EXTERNAL_REFERENCE_BINDING_LIST(V)
+#undef V
+
+  std::set<std::string> bindings_without_external_references = {
+      "async_context_frame",
+      "constants",
+      "symbols",
+  };
+
+  std::set<std::string> unregistered;
+  for (auto* mod : env->principal_realm()->internal_bindings) {
+    if (registered.count(mod->nm_modname) == 0 &&
+        bindings_without_external_references.count(mod->nm_modname) == 0) {
+      unregistered.insert(mod->nm_modname);
+    }
+  }
+
+  if (unregistered.size() == 0) {
+    return true;
+  }
+
+  FPrintF(
+      stderr,
+      "\n---- snapshot building check failed ---\n\n"
+      "The following bindings are loaded during the snapshot building process,"
+      " but their external reference registration methods have not been "
+      "called:\n\n");
+  for (auto& binding : unregistered) {
+    FPrintF(stderr, " - %s\n", binding);
+  }
+  FPrintF(stderr,
+          "\nIf the binding does not have any external references, "
+          "add it to the list of bindings_without_external_references "
+          "in src/node_snapshotable.cc.\n"
+          "Otherwise, make sure to call NODE_BINDING_EXTERNAL_REFERENCE() "
+          "with an appropriate register method for the binding, "
+          "and add it to EXTERNAL_REFERENCE_BINDING_LIST in "
+          "src/node_external_reference.h"
+          "\n\nSee \"Registering binding functions used in bootstrap\" "
+          "in src/README.md for more details."
+          "\n----\n\n");
+  return false;
+}
+
 ExitCode BuildSnapshotWithoutCodeCache(
     SnapshotData* out,
     const std::vector<std::string>& args,
@@ -1033,6 +1087,11 @@ ExitCode BuildSnapshotWithoutCodeCache(
     if (exit_code != ExitCode::kNoFailure) {
       return exit_code;
     }
+
+    if (snapshot_type == SnapshotMetadata::Type::kDefault &&
+        !ValidateBindings(env)) {
+      return ExitCode::kStartupSnapshotFailure;
+    }
   }
 
   return SnapshotBuilder::CreateSnapshot(out, setup.get());
@@ -1070,8 +1129,8 @@ ExitCode BuildCodeCacheFromSnapshot(SnapshotData* out,
       std::string size_str = FormatSize(item.data.length);
       per_process::Debug(DebugCategory::MKSNAPSHOT,
                          "Generated code cache for %d: %s\n",
-                         item.id.c_str(),
-                         size_str.c_str());
+                         item.id,
+                         size_str);
     }
   }
   return ExitCode::kNoFailure;
@@ -1309,7 +1368,8 @@ StartupData SerializeNodeContextData(Local<Context> holder,
     case ContextEmbedderIndex::kContextifyContext:
     case ContextEmbedderIndex::kRealm:
     case ContextEmbedderIndex::kContextTag: {
-      void* data = holder->GetAlignedPointerFromEmbedderData(index);
+      void* data = holder->GetAlignedPointerFromEmbedderData(
+          index, EmbedderDataTag::kPerContextData);
       per_process::Debug(
           DebugCategory::MKSNAPSHOT,
           "Serialize context data, index=%d, holder=%p, ptr=%p\n",
@@ -1400,7 +1460,8 @@ StartupData SerializeNodeContextInternalFields(Local<Object> holder,
   // For the moment we do not set any internal fields in ArrayBuffer
   // or ArrayBufferViews, so just return nullptr.
   if (holder->IsArrayBuffer() || holder->IsArrayBufferView()) {
-    CHECK_NULL(holder->GetAlignedPointerFromInternalField(index));
+    CHECK_NULL(holder->GetAlignedPointerFromInternalField(
+        index, EmbedderDataTag::kDefault));
     return StartupData{nullptr, 0};
   }
 
@@ -1419,8 +1480,9 @@ StartupData SerializeNodeContextInternalFields(Local<Object> holder,
                      static_cast<int>(index),
                      *holder);
 
-  BaseObject* object_ptr = static_cast<BaseObject*>(
-      holder->GetAlignedPointerFromInternalField(BaseObject::kSlot));
+  BaseObject* object_ptr =
+      static_cast<BaseObject*>(holder->GetAlignedPointerFromInternalField(
+          BaseObject::kSlot, EmbedderDataTag::kDefault));
   // If the native object is already set to null, ignore it.
   if (object_ptr == nullptr) {
     return StartupData{nullptr, 0};
@@ -1509,17 +1571,17 @@ void CompileSerializeMain(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[0]->IsString());
   Local<String> filename = args[0].As<String>();
   Local<String> source = args[1].As<String>();
+  Environment* env = Environment::GetCurrent(args);
   Isolate* isolate = args.GetIsolate();
   Local<Context> context = isolate->GetCurrentContext();
   // TODO(joyeecheung): do we need all of these? Maybe we would want a less
   // internal version of them.
-  LocalVector<String> parameters(
-      isolate,
-      {
-          FIXED_ONE_BYTE_STRING(isolate, "require"),
-          FIXED_ONE_BYTE_STRING(isolate, "__filename"),
-          FIXED_ONE_BYTE_STRING(isolate, "__dirname"),
-      });
+  LocalVector<String> parameters(isolate,
+                                 {
+                                     env->require_string(),
+                                     env->__filename_string(),
+                                     env->__dirname_string(),
+                                 });
 
   ScriptOrigin script_origin(filename, 0, 0, true);
   ScriptCompiler::Source script_source(source, script_origin);
@@ -1614,7 +1676,7 @@ void BindingData::Deserialize(Local<Context> context,
                               int index,
                               InternalFieldInfoBase* info) {
   DCHECK_IS_SNAPSHOT_SLOT(index);
-  v8::HandleScope scope(context->GetIsolate());
+  v8::HandleScope scope(Isolate::GetCurrent());
   Realm* realm = Realm::GetCurrent(context);
   // Recreate the buffer in the constructor.
   InternalFieldInfo* casted_info = static_cast<InternalFieldInfo*>(info);

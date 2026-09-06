@@ -1,5 +1,7 @@
 // Flags: --experimental-quic
-import { hasQuic, isAIX, isWindows, skip } from '../common/index.mjs';
+import { hasQuic, isAIX, isIBMi, isWindows, skip } from '../common/index.mjs';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 if (!hasQuic) {
   skip('QUIC support is not enabled');
@@ -9,10 +11,18 @@ if (isAIX) {
   // example server and client.
   skip('QUIC third-party tests are disabled on AIX');
 }
+if (isIBMi) {
+  // IBM i does not support some of the networking features used in the ngtcp2
+  // example server and client.
+  skip('QUIC third-party tests are disabled on IBM i');
+}
 if (isWindows) {
   // Windows does not support the [Li/U]nix specific headers and system calls
   // required by the ngtcp2 example server/client.
   skip('QUIC third-party tests are disabled on Windows');
+}
+if (!existsSync(resolve(process.execPath, '../ngtcp2_test_server'))) {
+  skip('ngtcp2_test_server binary not built');
 }
 
 const { default: QuicTestServer } = await import('../common/quic/test-server.mjs');

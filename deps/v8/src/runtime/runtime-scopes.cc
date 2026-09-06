@@ -12,7 +12,6 @@
 #include "src/execution/isolate-inl.h"
 #include "src/execution/isolate.h"
 #include "src/handles/handles.h"
-#include "src/heap/heap-inl.h"  // For ToBoolean. TODO(jkummerow): Drop.
 #include "src/interpreter/bytecode-flags-and-tokens.h"
 #include "src/objects/arguments-inl.h"
 #include "src/objects/fixed-array.h"
@@ -23,6 +22,7 @@
 #include "src/objects/oddball.h"
 #include "src/objects/smi.h"
 #include "src/objects/tagged.h"
+#include "src/roots/roots-inl.h"
 #include "src/runtime/runtime-utils.h"
 
 namespace v8 {
@@ -38,6 +38,12 @@ RUNTIME_FUNCTION(Runtime_ThrowUsingAssignError) {
   HandleScope scope(isolate);
   THROW_NEW_ERROR_RETURN_FAILURE(isolate,
                                  NewTypeError(MessageTemplate::kUsingAssign));
+}
+
+RUNTIME_FUNCTION(Runtime_ThrowAwaitUsingAssignError) {
+  HandleScope scope(isolate);
+  THROW_NEW_ERROR_RETURN_FAILURE(
+      isolate, NewTypeError(MessageTemplate::kAwaitUsingAssign));
 }
 
 namespace {
@@ -151,7 +157,7 @@ RUNTIME_FUNCTION(Runtime_DeclareModuleExports) {
       Cast<SourceTextModule>(context->extension())->regular_exports(), isolate);
 
   int length = declarations->length();
-  FOR_WITH_HANDLE_SCOPE(isolate, int, i = 0, i, i < length, i++, {
+  FOR_WITH_HANDLE_SCOPE(isolate, int i = 0, i, i < length, i++) {
     Tagged<Object> decl = declarations->get(i);
     int index;
     Tagged<Object> value;
@@ -171,7 +177,7 @@ RUNTIME_FUNCTION(Runtime_DeclareModuleExports) {
     }
 
     Cast<Cell>(exports->get(index - 1))->set_value(value);
-  });
+  }
 
   return ReadOnlyRoots(isolate).undefined_value();
 }
@@ -194,7 +200,7 @@ RUNTIME_FUNCTION(Runtime_DeclareGlobals) {
 
   // Traverse the name/value pairs and set the properties.
   int length = declarations->length();
-  FOR_WITH_HANDLE_SCOPE(isolate, int, i = 0, i, i < length, i++, {
+  FOR_WITH_HANDLE_SCOPE(isolate, int i = 0, i, i < length, i++) {
     Handle<Object> decl(declarations->get(i), isolate);
     Handle<String> name;
     Handle<Object> value;
@@ -227,8 +233,8 @@ RUNTIME_FUNCTION(Runtime_DeclareGlobals) {
     Tagged<Object> result =
         DeclareGlobal(isolate, global, name, value, attr, is_var,
                       RedeclarationType::kSyntaxError);
-    if (IsException(result)) return result;
-  });
+    if (IsExceptionHole(result)) return result;
+  }
 
   return ReadOnlyRoots(isolate).undefined_value();
 }
@@ -251,11 +257,10 @@ Maybe<bool> AddToDisposableStack(Isolate* isolate,
                                  DisposeMethodCallType type,
                                  DisposeMethodHint hint) {
   DirectHandle<Object> method;
-  ASSIGN_RETURN_ON_EXCEPTION_VALUE(
+  ASSIGN_RETURN_ON_EXCEPTION(
       isolate, method,
       JSDisposableStackBase::CheckValueAndGetDisposeMethod(isolate, value,
-                                                           hint),
-      Nothing<bool>());
+                                                           hint));
 
   // Return the DisposableResource Record { [[ResourceValue]]: V, [[Hint]]:
   // hint, [[DisposeMethod]]: method }.
@@ -427,7 +432,7 @@ Tagged<Object> DeclareEvalHelper(Isolate* isolate, Handle<String> name,
 
     if (index != Context::kNotFound) {
       DCHECK(holder.is_identical_to(context));
-      context->SetNoCell(index, *value);
+      Context::Set(context, index, value, isolate);
       return ReadOnlyRoots(isolate).undefined_value();
     }
 
@@ -669,9 +674,9 @@ RUNTIME_FUNCTION(Runtime_NewStrictArguments) {
     DirectHandle<FixedArray> array =
         isolate->factory()->NewFixedArray(argument_count);
     DisallowGarbageCollection no_gc;
-    WriteBarrierMode mode = array->GetWriteBarrierMode(no_gc);
+    WriteBarrierModeScope mode = array->GetWriteBarrierMode(no_gc);
     for (int i = 0; i < argument_count; i++) {
-      array->set(i, *arguments[i], mode);
+      array->set(i, *arguments[i], *mode);
     }
     result->set_elements(*array);
   }
@@ -696,9 +701,9 @@ RUNTIME_FUNCTION(Runtime_NewRestParameter) {
   {
     DisallowGarbageCollection no_gc;
     Tagged<FixedArray> elements = Cast<FixedArray>(result->elements());
-    WriteBarrierMode mode = elements->GetWriteBarrierMode(no_gc);
+    WriteBarrierModeScope mode = elements->GetWriteBarrierMode(no_gc);
     for (int i = 0; i < num_elements; i++) {
-      elements->set(i, *arguments[i + start_index], mode);
+      elements->set(i, *arguments[i + start_index], *mode);
     }
   }
   return *result;
@@ -771,7 +776,6 @@ RUNTIME_FUNCTION(Runtime_PushBlockContext) {
   return *isolate->factory()->NewBlockContext(current, scope_info);
 }
 
-
 RUNTIME_FUNCTION(Runtime_DeleteLookupSlot) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
@@ -804,9 +808,8 @@ RUNTIME_FUNCTION(Runtime_DeleteLookupSlot) {
   DirectHandle<JSReceiver> object = Cast<JSReceiver>(holder);
   Maybe<bool> result = JSReceiver::DeleteProperty(isolate, object, name);
   MAYBE_RETURN(result, ReadOnlyRoots(isolate).exception());
-  return isolate->heap()->ToBoolean(result.FromJust());
+  return ReadOnlyRoots(isolate).boolean_value(result.FromJust());
 }
-
 
 namespace {
 
@@ -878,7 +881,6 @@ MaybeDirectHandle<Object> LoadLookupSlot(
 
 }  // namespace
 
-
 RUNTIME_FUNCTION(Runtime_LoadLookupSlot) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
@@ -887,14 +889,12 @@ RUNTIME_FUNCTION(Runtime_LoadLookupSlot) {
                            LoadLookupSlot(isolate, name, kThrowOnError));
 }
 
-
 RUNTIME_FUNCTION(Runtime_LoadLookupSlotInsideTypeof) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   Handle<String> name = args.at<String>(0);
   RETURN_RESULT_OR_FAILURE(isolate, LoadLookupSlot(isolate, name, kDontThrow));
 }
-
 
 RUNTIME_FUNCTION_RETURN_PAIR(Runtime_LoadLookupSlotForCall) {
   HandleScope scope(isolate);
@@ -996,7 +996,6 @@ MaybeDirectHandle<Object> StoreLookupSlot(
 
 }  // namespace
 
-
 RUNTIME_FUNCTION(Runtime_StoreLookupSlot_Sloppy) {
   HandleScope scope(isolate);
   DCHECK_EQ(2, args.length());
@@ -1050,7 +1049,11 @@ RUNTIME_FUNCTION(Runtime_StoreGlobalNoHoleCheckForReplLetOrConst) {
   CHECK(found);
   DirectHandle<Context> script_context(
       script_contexts->get(lookup_result.context_index), isolate);
-  Context::Set(script_context, lookup_result.slot_index, value, isolate);
+  if (lookup_result.mode == VariableMode::kConst) {
+    script_context->SetNoCell(lookup_result.slot_index, *value);
+  } else {
+    Context::Set(script_context, lookup_result.slot_index, value, isolate);
+  }
   return *value;
 }
 

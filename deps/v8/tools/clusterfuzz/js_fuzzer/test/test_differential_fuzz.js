@@ -13,6 +13,7 @@ const path = require('path');
 const program = require('commander');
 const sinon = require('sinon');
 
+const corpus = require('../corpus.js');
 const helpers = require('./helpers.js');
 const scriptMutator = require('../script_mutator.js');
 const sourceHelpers = require('../source_helpers.js');
@@ -39,15 +40,13 @@ function testMutators(settings, mutatorClass, inputFile, expectedFile) {
 
 describe('Differential fuzzing', () => {
   beforeEach(() => {
-    // Zero settings for all mutators.
-    this.settings = scriptMutator.defaultSettings();
-    for (const key of Object.keys(this.settings)) {
-      this.settings[key] = 0.0;
-    }
     // By default, deterministically use all mutations of differential
     // fuzzing.
+    this.settings = helpers.zeroSettings();
     this.settings['DIFF_FUZZ_EXTRA_PRINT'] = 1.0;
     this.settings['DIFF_FUZZ_TRACK_CAUGHT'] = 1.0;
+    this.settings['DIFF_FUZZ_BLOCK_PRINT'] = 0.0;
+    this.settings['DIFF_FUZZ_SKIP_FUNCTIONS'] = 0.0;
 
     // Fake fuzzer being called with --input_dir flag.
     this.oldInputDir = program.input_dir;
@@ -56,6 +55,8 @@ describe('Differential fuzzing', () => {
     // Make remaining places deterministic that don't use global settings, e.g.
     // try-catch skip behavior.
     helpers.deterministicRandom(sandbox);
+
+    sandbox.stub(corpus, 'TRANSPILE_PROB').value(0.0);
   });
 
   afterEach(() => {
@@ -79,6 +80,25 @@ describe('Differential fuzzing', () => {
         DifferentialFuzzMutator,
         'mutations.js',
         'mutations_expected.js');
+  });
+
+  it('adds block printing', () => {
+    this.settings['DIFF_FUZZ_EXTRA_PRINT'] = 0.0;
+    this.settings['DIFF_FUZZ_BLOCK_PRINT'] = 1.0;
+    testMutators(
+        this.settings,
+        DifferentialFuzzMutator,
+        'mutations.js',
+        'mutations_block_expected.js');
+  });
+
+  it('skips functions', () => {
+    this.settings['DIFF_FUZZ_SKIP_FUNCTIONS'] = 1.0;
+    testMutators(
+        this.settings,
+        DifferentialFuzzMutator,
+        'mutations.js',
+        'mutations_skip_fun_expected.js');
   });
 
   it('does no extra printing', () => {
@@ -220,6 +240,8 @@ describe('Differential fuzzing with fuzzilli', () => {
         helpers.BASE_DIR, 'differential_fuzz_fuzzilli');
 
     helpers.deterministicRandom(sandbox);
+
+    sandbox.stub(corpus, 'TRANSPILE_PROB').value(0.0);
   });
 
   afterEach(() => {
@@ -242,9 +264,16 @@ describe('Differential fuzzing with fuzzilli', () => {
         scriptMutator.defaultSettings(), helpers.DB_DIR);
 
     // Configure 3 output tests and V8 engine.
-    const testRunner = new mutator.runnerClass(
-        program.input_dir, 'v8', 3);
-    for (const [i, inputs] of testRunner.enumerateInputs()) {
+    const settings = {
+      input_dir: program.input_dir,
+      diff_fuzz: true,
+      engine: 'v8',
+      no_of_files: 3,
+    };
+    const testRunner = new mutator.runnerClass(settings);
+    const inputSets = Array.from(testRunner.enumerateInputs());
+    assert.equal(3, inputSets.length);
+    for (const [i, inputs] of inputSets) {
       const mutated = mutator.mutateMultiple(inputs);
       helpers.assertExpectedResult(
           `differential_fuzz_fuzzilli/expected_code_${i}.js`, mutated.code);

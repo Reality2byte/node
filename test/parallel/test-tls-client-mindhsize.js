@@ -5,7 +5,7 @@ if (!common.hasCrypto)
   common.skip('missing crypto');
 
 // OpenSSL has a set of security levels which affect what algorithms
-// are available by default. Different OpenSSL veresions have different
+// are available by default. Different OpenSSL versions have different
 // default security levels and we use this value to adjust what a test
 // expects based on the security level. You can read more in
 // https://docs.openssl.org/1.1.1/man3/SSL_CTX_set_security_level/#default-callback-behaviour
@@ -13,6 +13,9 @@ const secLevel = require('internal/crypto/util').getOpenSSLSecLevel();
 const assert = require('assert');
 const tls = require('tls');
 const fixtures = require('../common/fixtures');
+const { hasOpenSSL, hasFIPS, isBoringSSL } = require('../common/crypto');
+const fips3 = hasFIPS(3);
+const fips4 = hasFIPS(4);
 
 const key = fixtures.readKey('agent2-key.pem');
 const cert = fixtures.readKey('agent2-cert.pem');
@@ -24,11 +27,11 @@ function loadDHParam(n) {
   return fixtures.readKey(`dh${n}.pem`);
 }
 
-function test(size, err, next) {
+function test(size, err, next, minDHSizeOverride) {
   const options = {
     key: key,
     cert: cert,
-    dhparam: loadDHParam(size),
+    dhparam: size === 'auto' ? 'auto' : loadDHParam(size),
     ciphers: 'DHE-RSA-AES128-GCM-SHA256'
   };
 
@@ -36,17 +39,17 @@ function test(size, err, next) {
     conn.end();
   });
 
-  server.on('close', function(isException) {
+  server.on('close', common.mustCall(function(isException) {
     assert(!isException);
     if (next) next();
-  });
+  }));
 
-  server.listen(0, function() {
+  server.listen(0, common.mustCall(function() {
     // Client set minimum DH parameter size to 2048 or 3072 bits
     // so that it fails when it makes a connection to the tls
     // server where is too small. This depends on the openssl
     // security level
-    const minDHSize = (secLevel > 1) ? 3072 : 2048;
+    const minDHSize = minDHSizeOverride ?? ((secLevel > 1) ? 3072 : 2048);
     const client = tls.connect({
       minDHSize: minDHSize,
       port: this.address().port,
@@ -57,13 +60,14 @@ function test(size, err, next) {
       server.close();
     });
     if (err) {
-      client.on('error', function(e) {
+      client.on('error', common.mustCall((e) => {
         nerror++;
-        assert.strictEqual(e.code, 'ERR_TLS_DH_PARAM_SIZE');
+        assert.strictEqual(e.code, fips3 && !fips4 ?
+          'ERR_SSL_BAD_DH_VALUE' : 'ERR_TLS_DH_PARAM_SIZE');
         server.close();
-      });
+      }));
     }
-  });
+  }));
 }
 
 // A client connection fails with an error when a client has an
@@ -84,15 +88,28 @@ function testDHE3072() {
   test(3072, false, null);
 }
 
-if (secLevel > 1) {
-  // Minimum size for OpenSSL security level 2 and above is 2048 by default
-  testDHE2048(true, testDHE3072);
-} else {
-  testDHE1024();
-}
+if (!isBoringSSL) {
+  if (fips3 && !fips4) {
+    // The FIPS provider rejects explicit DH parameters without a validated
+    // subgroup, while OpenSSL's built-in FFDHE group remains available.
+    testDHE2048(true, () => test('auto', false, null, 2048));
+  } else if (hasOpenSSL(4, 0)) {
+    // OpenSSL 4.0 implements RFC 7919 FFDHE negotiation for TLS 1.2 and
+    // ignores the server-supplied dhparam in favor of FFDHE-2048. The 3072
+    // success case is therefore replaced by a 2048 success case.
+    testDHE2048(true, () => test(2048, false, null, 2048));
+  } else if (secLevel > 1) {
+    // Minimum size for OpenSSL security level 2 and above is 2048 by default
+    testDHE2048(true, testDHE3072);
+  } else {
+    testDHE1024();
+  }
 
-assert.throws(() => test(512, true, common.mustNotCall()),
-              /DH parameter is less than 1024 bits/);
+  assert.throws(() => test(512, true, common.mustNotCall()),
+                /DH parameter is less than 1024 bits/);
+} else {
+  require('../common/boringssl').assertFiniteFieldDheUnsupported();
+}
 
 for (const minDHSize of [0, -1, -Infinity, NaN]) {
   assert.throws(() => {
@@ -112,7 +129,9 @@ for (const minDHSize of [true, false, null, undefined, {}, [], '', '1']) {
   });
 }
 
-process.on('exit', function() {
-  assert.strictEqual(nsuccess, 1);
-  assert.strictEqual(nerror, 1);
-});
+if (!isBoringSSL) {
+  process.on('exit', function() {
+    assert.strictEqual(nsuccess, 1);
+    assert.strictEqual(nerror, 1);
+  });
+}

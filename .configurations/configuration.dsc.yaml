@@ -5,11 +5,11 @@ properties:
     - resource: Microsoft.WinGet.DSC/WinGetPackage
       id: pythonPackage
       directives:
-        description: Install Python 3.12
+        description: Install Python 3.14
         module: Microsoft.WinGet.DSC
         allowPrerelease: true
       settings:
-        id: Python.Python.3.12
+        id: Python.Python.3.14
         source: winget
     - resource: Microsoft.WinGet.DSC/WinGetPackage
       id: vsPackage
@@ -36,6 +36,13 @@ properties:
           - Microsoft.VisualStudio.Component.VC.Llvm.Clang
           - Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset
     - resource: Microsoft.WinGet.DSC/WinGetPackage
+      id: rustPackage
+      directives:
+        description: Install Rust with MSVC toolchain
+      settings:
+        id: Rustlang.Rust.MSVC
+        source: winget
+    - resource: Microsoft.WinGet.DSC/WinGetPackage
       id: gitPackage
       directives:
         description: Install Git
@@ -51,4 +58,4 @@ properties:
       settings:
         id: Nasm.Nasm
         source: winget
-  configurationVersion: 0.1.0
+  configurationVersion: 0.2.0

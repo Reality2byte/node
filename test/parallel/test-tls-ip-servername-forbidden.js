@@ -1,16 +1,16 @@
 'use strict';
 
 const common = require('../common');
-const { throws } = require('assert');
+const assert = require('assert');
 
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
 const tls = require('tls');
 
-// Verify that passing an IP address the the servername option
+// Verify that passing an IP address to the servername option
 // throws an error.
-throws(() => tls.connect({
+assert.throws(() => tls.connect({
   port: 1234,
   servername: '127.0.0.1',
 }, common.mustNotCall()), {

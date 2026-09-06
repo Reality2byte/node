@@ -29,7 +29,20 @@ function getReplRunOutput(inputStr, replOptions) {
 
     input.emit('data', inputStr);
 
-    input.run(['']);
+    if (!replOptions.preview) {
+      input.run(['']);
+      return;
+    }
+
+    const afterEcho = output.accumulator;
+    let attempts = 0;
+    (function waitForPreview() {
+      if (output.accumulator !== afterEcho || ++attempts > 100) {
+        input.run(['']);
+        return;
+      }
+      setImmediate(waitForPreview);
+    })();
   });
 }
 
@@ -45,7 +58,7 @@ describe('with previews', () => {
     );
     const lines = getSingleCommandLines(output);
     assert.match(lines.command, /^'Hello custom' \+ ' eval World!'/);
-    assert.match(lines.prompt, new RegExp(`${testingReplPrompt}$`));
+    assert.match(lines.prompt, new RegExp(`${RegExp.escape(testingReplPrompt)}$`));
     assert.strictEqual(lines.result, "'Hello custom eval World!'");
     assert.strictEqual(lines.preview, undefined);
   });
@@ -62,7 +75,7 @@ describe('with previews', () => {
     );
     const lines = getSingleCommandLines(output);
     assert.match(lines.command, /^'Hello custom' \+ ' eval World!'/);
-    assert.match(lines.prompt, new RegExp(`${testingReplPrompt}$`));
+    assert.match(lines.prompt, new RegExp(`${RegExp.escape(testingReplPrompt)}$`));
     assert.strictEqual(lines.result, "'Hello custom eval World!'");
     assert.match(lines.preview, /'Hello custom eval World!'/);
   });

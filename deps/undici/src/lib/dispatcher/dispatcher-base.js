@@ -1,7 +1,7 @@
 'use strict'
 
+const buffer = require('node:buffer')
 const Dispatcher = require('./dispatcher')
-const UnwrapHandler = require('../handler/unwrap-handler')
 const {
   ClientDestroyedError,
   ClientClosedError,
@@ -11,19 +11,49 @@ const { kDestroy, kClose, kClosed, kDestroyed, kDispatch } = require('../core/sy
 
 const kOnDestroyed = Symbol('onDestroyed')
 const kOnClosed = Symbol('onClosed')
+const kWebSocketOptions = Symbol('webSocketOptions')
+const kEventSourceOptions = Symbol('eventSourceOptions')
 
 class DispatcherBase extends Dispatcher {
   /** @type {boolean} */
   [kDestroyed] = false;
 
-  /** @type {Array|null} */
+  /** @type {Array<Function|null} */
   [kOnDestroyed] = null;
 
   /** @type {boolean} */
   [kClosed] = false;
 
-  /** @type {Array} */
-  [kOnClosed] = []
+  /** @type {Array<Function>|null} */
+  [kOnClosed] = null
+
+  /**
+   * @param {import('../../types/dispatcher').DispatcherOptions} [opts]
+   */
+  constructor (opts) {
+    super()
+    this[kWebSocketOptions] = opts?.webSocket ?? {}
+    this[kEventSourceOptions] = opts?.eventSource ?? {}
+  }
+
+  /**
+   * @returns {import('../../types/client').Client.WebSocketOptions}
+   */
+  get webSocketOptions () {
+    return {
+      maxFragments: this[kWebSocketOptions].maxFragments ?? 131072,
+      maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024 // 128 MB default
+    }
+  }
+
+  /**
+   * @returns {import('../../types/client').Client.EventSourceOptions}
+   */
+  get eventSourceOptions () {
+    return {
+      maxEventSize: this[kEventSourceOptions].maxEventSize ?? buffer.kStringMaxLength
+    }
+  }
 
   /** @returns {boolean} */
   get destroyed () {
@@ -49,7 +79,8 @@ class DispatcherBase extends Dispatcher {
     }
 
     if (this[kDestroyed]) {
-      queueMicrotask(() => callback(new ClientDestroyedError(), null))
+      const err = new ClientDestroyedError()
+      queueMicrotask(() => callback(err, null))
       return
     }
 
@@ -63,6 +94,7 @@ class DispatcherBase extends Dispatcher {
     }
 
     this[kClosed] = true
+    this[kOnClosed] ??= []
     this[kOnClosed].push(callback)
 
     const onClosed = () => {
@@ -76,9 +108,7 @@ class DispatcherBase extends Dispatcher {
     // Should not error.
     this[kClose]()
       .then(() => this.destroy())
-      .then(() => {
-        queueMicrotask(onClosed)
-      })
+      .then(() => queueMicrotask(onClosed))
   }
 
   destroy (err, callback) {
@@ -90,7 +120,7 @@ class DispatcherBase extends Dispatcher {
     if (callback === undefined) {
       return new Promise((resolve, reject) => {
         this.destroy(err, (err, data) => {
-          return err ? /* istanbul ignore next: should never error */ reject(err) : resolve(data)
+          return err ? reject(err) : resolve(data)
         })
       })
     }
@@ -113,7 +143,7 @@ class DispatcherBase extends Dispatcher {
     }
 
     this[kDestroyed] = true
-    this[kOnDestroyed] = this[kOnDestroyed] || []
+    this[kOnDestroyed] ??= []
     this[kOnDestroyed].push(callback)
 
     const onDestroyed = () => {
@@ -125,9 +155,8 @@ class DispatcherBase extends Dispatcher {
     }
 
     // Should not error.
-    this[kDestroy](err).then(() => {
-      queueMicrotask(onDestroyed)
-    })
+    this[kDestroy](err)
+      .then(() => queueMicrotask(onDestroyed))
   }
 
   dispatch (opts, handler) {
@@ -135,11 +164,13 @@ class DispatcherBase extends Dispatcher {
       throw new InvalidArgumentError('handler must be an object')
     }
 
-    handler = UnwrapHandler.unwrap(handler)
-
     try {
       if (!opts || typeof opts !== 'object') {
         throw new InvalidArgumentError('opts must be an object.')
+      }
+
+      if (opts.dispatcher) {
+        throw new InvalidArgumentError('opts.dispatcher is not supported by instance methods. Pass opts.dispatcher to the top-level undici functions or call the dispatcher instance method directly.')
       }
 
       if (this[kDestroyed] || this[kOnDestroyed]) {
@@ -152,11 +183,11 @@ class DispatcherBase extends Dispatcher {
 
       return this[kDispatch](opts, handler)
     } catch (err) {
-      if (typeof handler.onError !== 'function') {
+      if (typeof handler.onResponseError !== 'function') {
         throw err
       }
 
-      handler.onError(err)
+      handler.onResponseError(null, err)
 
       return false
     }

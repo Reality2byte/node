@@ -11,7 +11,9 @@ if (common.isPi()) {
 }
 
 const assert = require('assert');
+const { hasFIPS } = require('../common/crypto');
 const { subtle } = globalThis.crypto;
+const fips4 = hasFIPS(4);
 
 function getDeriveKeyInfo(name, length, hash, ...usages) {
   return [{ name, length, hash }, usages];
@@ -24,12 +26,12 @@ const kDerivedKeyTypes = [
   ['AES-CTR', 256, undefined, 'encrypt', 'decrypt'],
   ['AES-GCM', 128, undefined, 'encrypt', 'decrypt'],
   ['AES-GCM', 256, undefined, 'encrypt', 'decrypt'],
-  ['AES-KW', 128, undefined, 'wrapKey', 'unwrapKey'],
-  ['AES-KW', 256, undefined, 'wrapKey', 'unwrapKey'],
   ['HMAC', 256, 'SHA-1', 'sign', 'verify'],
   ['HMAC', 256, 'SHA-256', 'sign', 'verify'],
   ['HMAC', 256, 'SHA-384', 'sign', 'verify'],
   ['HMAC', 256, 'SHA-512', 'sign', 'verify'],
+  ['AES-KW', 128, undefined, 'wrapKey', 'unwrapKey'],
+  ['AES-KW', 256, undefined, 'wrapKey', 'unwrapKey'],
 ];
 
 const kPasswords = {
@@ -362,50 +364,40 @@ const kDerivations = {
 };
 
 async function setupBaseKeys() {
-  const promises = [];
-
   const baseKeys = {};
   const noBits = {};
   const noKey = {};
   let wrongKey = null;
 
-  Object.keys(kPasswords).forEach((size) => {
-    promises.push(
-      subtle.importKey(
-        'raw',
-        Buffer.from(kPasswords[size], 'hex'),
-        { name: 'PBKDF2' },
-        false,
-        ['deriveKey', 'deriveBits'])
-        .then((key) => baseKeys[size] = key));
-
-    promises.push(
-      subtle.importKey(
-        'raw',
-        Buffer.from(kPasswords[size], 'hex'),
-        { name: 'PBKDF2' },
-        false,
-        ['deriveBits'])
-        .then((key) => noKey[size] = key));
-
-    promises.push(
-      subtle.importKey(
-        'raw',
-        Buffer.from(kPasswords[size], 'hex'),
-        { name: 'PBKDF2' },
-        false,
-        ['deriveKey'])
-        .then((key) => noBits[size] = key));
-  });
-
-  promises.push(
-    subtle.generateKey(
-      { name: 'ECDH', namedCurve: 'P-521' },
+  await Promise.all(Object.keys(kPasswords).flatMap((size) => [
+    subtle.importKey(
+      'raw',
+      Buffer.from(kPasswords[size], 'hex'),
+      { name: 'PBKDF2' },
       false,
       ['deriveKey', 'deriveBits'])
-      .then((key) => wrongKey = key.privateKey));
+        .then((key) => baseKeys[size] = key),
 
-  await Promise.all(promises);
+    subtle.importKey(
+      'raw',
+      Buffer.from(kPasswords[size], 'hex'),
+      { name: 'PBKDF2' },
+      false,
+      ['deriveBits'])
+        .then((key) => noKey[size] = key),
+
+    subtle.importKey(
+      'raw',
+      Buffer.from(kPasswords[size], 'hex'),
+      { name: 'PBKDF2' },
+      false,
+      ['deriveKey'])
+        .then((key) => noBits[size] = key),
+  ]).concat(subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-521' },
+    false,
+    ['deriveKey', 'deriveBits'])
+      .then((key) => wrongKey = key.privateKey)));
 
   return { baseKeys, noBits, noKey, wrongKey };
 }
@@ -642,6 +634,19 @@ async function testWrongKeyType(
         Object.keys(kDerivations[size][saltSize][hash])
           .forEach((iterations) => {
             const args = [baseKeys, size, saltSize, hash, iterations | 0];
+            if (fips4 &&
+                (size === 'empty' || saltSize !== 'long' || iterations < 1000)) {
+              variations.push(assert.rejects(
+                testDeriveBits(...args), { name: 'OperationError' }));
+              kDerivedKeyTypes.forEach((keyType) => {
+                const keyArgs = getDeriveKeyInfo(...keyType);
+                variations.push(assert.rejects(
+                  testDeriveKey(...args, ...keyArgs),
+                  { name: 'OperationError' }));
+              });
+              return;
+            }
+
             variations.push(testDeriveBits(...args));
             variations.push(testDeriveBitsBadLengths(...args));
             variations.push(testDeriveBitsBadHash(...args));
@@ -684,12 +689,17 @@ async function testWrongKeyType(
 
 // https://github.com/w3c/webcrypto/pull/380
 {
-  crypto.subtle.importKey('raw', new Uint8Array(0), 'PBKDF2', false, ['deriveBits']).then((key) => {
+  crypto.subtle.importKey(
+    'raw',
+    new Uint8Array(fips4 ? 8 : 0),
+    'PBKDF2',
+    false,
+    ['deriveBits']).then((key) => {
     return crypto.subtle.deriveBits({
       name: 'PBKDF2',
       hash: { name: 'SHA-256' },
-      iterations: 10,
-      salt: new Uint8Array(0),
+      iterations: fips4 ? 1000 : 10,
+      salt: new Uint8Array(fips4 ? 16 : 0),
     }, key, 0);
   }).then((bits) => {
     assert.deepStrictEqual(bits, new ArrayBuffer(0));

@@ -36,7 +36,7 @@ suite('accessing the node:sqlite module', () => {
 });
 
 test('ERR_SQLITE_ERROR is thrown for errors originating from SQLite', (t) => {
-  const db = new DatabaseSync(nextDb());
+  const db = new DatabaseSync(':memory:');
   t.after(() => { db.close(); });
   const setup = db.exec(`
     CREATE TABLE test(
@@ -86,6 +86,7 @@ test('sqlite constants are defined', (t) => {
 });
 
 test('PRAGMAs are supported', (t) => {
+  // WAL journal mode requires an on-disk database.
   const db = new DatabaseSync(nextDb());
   t.after(() => { db.close(); });
   t.assert.deepStrictEqual(
@@ -204,8 +205,21 @@ suite('SQL APIs enabled at build time', () => {
     );
   });
 
+  test('percentile is enabled', (t) => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`
+      CREATE TABLE t1 (x INTEGER);
+      INSERT INTO t1 (x) VALUES (1), (2), (3), (4), (5);
+    `);
+
+    t.assert.deepStrictEqual(
+      db.prepare('SELECT percentile(x, 50) AS p50 FROM t1;').get(),
+      { __proto__: null, p50: 3 },
+    );
+  });
+
   test('dbstat is enabled', (t) => {
-    const db = new DatabaseSync(nextDb());
+    const db = new DatabaseSync(':memory:');
     t.after(() => { db.close(); });
     db.exec(`
       CREATE TABLE t1 (key INTEGER PRIMARY KEY);
@@ -244,7 +258,7 @@ suite('SQL APIs enabled at build time', () => {
     );
   });
 
-  test('fts3 parenthesis', (t) => {
+  test('fts3 parenthesis is enabled', (t) => {
     const db = new DatabaseSync(':memory:');
     db.exec(`
       CREATE VIRTUAL TABLE t1 USING fts3(content TEXT);

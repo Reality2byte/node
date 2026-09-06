@@ -1,4 +1,10 @@
-import { isWindows, skipIfSQLiteMissing } from '../common/index.mjs';
+// Flags: --expose-gc
+import {
+  isWindows,
+  skipIfSQLiteMissing,
+  spawnPromisified,
+} from '../common/index.mjs';
+import fixtures from '../common/fixtures.js';
 import tmpdir from '../common/tmpdir.js';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -122,6 +128,15 @@ describe('backup()', () => {
       code: 'ERR_INVALID_ARG_TYPE',
       message: 'The "options.rate" argument must be an integer.'
     });
+
+    for (const rate of [0, -1]) {
+      t.assert.throws(() => {
+        backup(database, 'hello.db', { rate });
+      }, {
+        code: 'ERR_OUT_OF_RANGE',
+        message: 'The "options.rate" argument must be a positive integer.'
+      });
+    }
 
     t.assert.throws(() => {
       backup(database, 'hello.db', {
@@ -313,4 +328,54 @@ test('backup fails when path cannot be opened', async (t) => {
 test('backup has correct name and length', (t) => {
   t.assert.strictEqual(backup.name, 'backup');
   t.assert.strictEqual(backup.length, 2);
+});
+
+test('source database is kept alive while a backup is in flight', async (t) => {
+  // Regression test: previously, BackupJob stored a raw DatabaseSync* and the
+  // source could be garbage-collected while the backup was still running,
+  // leading to a use-after-free when BackupJob::Finalize() dereferenced the
+  // stale pointer via source_->RemoveBackup(this).
+  const destDb = nextDb();
+
+  let database = makeSourceDb();
+  // Insert enough rows to ensure the backup takes multiple steps.
+  const insert = database.prepare('INSERT INTO data (key, value) VALUES (?, ?)');
+  for (let i = 3; i <= 500; i++) {
+    insert.run(i, 'A'.repeat(1024) + i);
+  }
+
+  const p = backup(database, destDb, {
+    rate: 1,
+    progress() {},
+  });
+  // Drop the last strong JS reference to the source database. With the bug,
+  // the DatabaseSync could be collected here and the in-flight backup would
+  // later crash while accessing the freed source.
+  database = null;
+
+  // Nudge the GC aggressively, but the backup must keep the source alive
+  // regardless. Without the fix, the source DatabaseSync would be collected
+  // and BackupJob::Finalize() would crash the process.
+  for (let i = 0; i < 5; i++) {
+    global.gc();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  const totalPages = await p;
+  t.assert.ok(totalPages > 0);
+
+  const backupDb = new DatabaseSync(destDb);
+  t.after(() => { backupDb.close(); });
+  const rows = backupDb.prepare('SELECT COUNT(*) AS n FROM data').get();
+  t.assert.strictEqual(rows.n, 500);
+});
+
+test('backup promise settles when the backup is the last active request', async (t) => {
+  const { code, signal, stderr } = await spawnPromisified(process.execPath, [
+    fixtures.path('sqlite', 'backup-last-request.mjs'),
+    nextDb(),
+  ]);
+
+  t.assert.strictEqual(signal, null);
+  t.assert.strictEqual(code, 0, stderr);
 });

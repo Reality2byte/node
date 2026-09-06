@@ -5,7 +5,7 @@ const common = require('../common');
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
-const { hasOpenSSL } = require('../common/crypto');
+const { hasOpenSSL, isBoringSSL } = require('../common/crypto');
 
 const assert = require('assert');
 const crypto = require('crypto');
@@ -14,6 +14,44 @@ const { subtle } = globalThis.crypto;
 const vectors = require('../fixtures/crypto/eddsa')();
 
 const supportsContext = hasOpenSSL(3, 2);
+
+const smallOrderVerifyVectors = [
+  {
+    name: 'Ed25519',
+    publicKey: Buffer.from(
+      'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa',
+      'hex'),
+    signature: Buffer.from(
+      'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a' +
+      '0000000000000000000000000000000000000000000000000000000000000000',
+      'hex'),
+    data: Buffer.from(
+      '8c93255d71dcab10e8f379c26200f3c7bd5f09d9bc3068d3ef4edeb4853022b6',
+      'hex'),
+  },
+];
+
+if (!isBoringSSL) {
+  smallOrderVerifyVectors.push({
+    name: 'Ed448',
+    publicKey: Buffer.concat([Buffer.from([1]), Buffer.alloc(56)]),
+    signature: Buffer.concat([Buffer.from([1]), Buffer.alloc(113)]),
+    data: Buffer.from([1, 2, 3]),
+  });
+}
+
+async function testSmallOrderVerify({ name, publicKey, signature, data }) {
+  const key = await subtle.importKey(
+    'raw',
+    publicKey,
+    { name },
+    false,
+    ['verify']);
+
+  assert.strictEqual(
+    await subtle.verify({ name }, key, signature, data),
+    false);
+}
 
 async function testVerify({ name,
                             context,
@@ -54,7 +92,7 @@ async function testVerify({ name,
     subtle.generateKey(
       {
         name: 'RSA-PSS',
-        modulusLength: 1024,
+        modulusLength: crypto.getFips() === 1 ? 2048 : 1024,
         publicExponent: new Uint8Array([1, 0, 1]),
         hash: 'SHA-256',
       },
@@ -101,27 +139,25 @@ async function testVerify({ name,
   // Test failure when using the wrong algorithms
   await assert.rejects(
     subtle.verify({ name, context }, hmacKey, signature, data), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.verify({ name, context }, rsaKeys.publicKey, signature, data), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.verify({ name, context }, ecKeys.publicKey, signature, data), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
-  if (name === 'Ed448' && supportsContext) {
+  if (name === 'Ed448') {
     // Test failure when too long context
     await assert.rejects(
-      subtle.verify({ name, context: new Uint8Array(256) }, publicKey, signature, data), (err) => {
-        assert.strictEqual(err.name, 'OperationError');
-        assert.strictEqual(err.cause.code, 'ERR_OUT_OF_RANGE');
-        assert.strictEqual(err.cause.message, 'context string must be at most 255 bytes');
-        return true;
+      subtle.verify({ name, context: new Uint8Array(256) }, publicKey, signature, data), {
+        name: 'OperationError',
+        message: 'ContextParams.context must be at most 255 bytes',
       });
   }
 
@@ -181,7 +217,7 @@ async function testSign({ name,
     subtle.generateKey(
       {
         name: 'RSA-PSS',
-        modulusLength: 1024,
+        modulusLength: crypto.getFips() === 1 ? 2048 : 1024,
         publicExponent: new Uint8Array([1, 0, 1]),
         hash: 'SHA-256',
       },
@@ -227,27 +263,25 @@ async function testSign({ name,
   // Test failure when using the wrong algorithms
   await assert.rejects(
     subtle.sign({ name, context }, hmacKey, data), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.sign({ name, context }, rsaKeys.privateKey, data), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.sign({ name, context }, ecKeys.privateKey, data), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 
-  if (name === 'Ed448' && supportsContext) {
+  if (name === 'Ed448') {
     // Test failure when too long context
     await assert.rejects(
-      subtle.sign({ name, context: new Uint8Array(256) }, privateKey, data), (err) => {
-        assert.strictEqual(err.name, 'OperationError');
-        assert.strictEqual(err.cause.code, 'ERR_OUT_OF_RANGE');
-        assert.strictEqual(err.cause.message, 'context string must be at most 255 bytes');
-        return true;
+      subtle.sign({ name, context: new Uint8Array(256) }, privateKey, data), {
+        name: 'OperationError',
+        message: 'ContextParams.context must be at most 255 bytes',
       });
   }
 }
@@ -259,6 +293,9 @@ async function testSign({ name,
     if (!supportsContext && vector.context?.byteLength) return;
     variations.push(testVerify(vector));
     variations.push(testSign(vector));
+  });
+  smallOrderVerifyVectors.forEach((vector) => {
+    variations.push(testSmallOrderVerify(vector));
   });
 
   await Promise.all(variations);

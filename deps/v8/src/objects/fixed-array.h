@@ -9,6 +9,7 @@
 
 #include "src/common/globals.h"
 #include "src/handles/maybe-handles.h"
+#include "src/objects/free-space.h"
 #include "src/objects/heap-object.h"
 #include "src/objects/instance-type.h"
 #include "src/objects/maybe-object.h"
@@ -29,8 +30,10 @@ namespace v8::internal {
 // Limit all fixed arrays to the same max capacity, so that non-resizing
 // transitions between different elements kinds (like Smi to Double) will not
 // error.
+// This could be larger, but the next power of two up would push the maximum
+// byte size of FixedDoubleArray out of int32 range.
 static constexpr int kMaxFixedArrayCapacity =
-    V8_LOWER_LIMITS_MODE_BOOL ? (16 * 1024 * 1024) : (64 * 1024 * 1024);
+    V8_LOWER_LIMITS_MODE_BOOL ? (16 * 1024 * 1024) : (128 * 1024 * 1024);
 
 namespace detail {
 template <class Super, bool kLengthEqualsCapacity>
@@ -52,6 +55,11 @@ class ArrayHeaderBase<Super, false> : public Super {
 V8_OBJECT template <class Super>
 class ArrayHeaderBase<Super, true> : public Super {
  public:
+  // Length and capacity are never supposed to be negative.
+  // See https://crbug.com/441221573.
+  inline uint32_t ulength() const;
+  inline uint32_t ucapacity() const;
+
   inline int length() const;
   inline int length(AcquireLoadTag tag) const;
   inline void set_length(int value);
@@ -76,7 +84,7 @@ struct TaggedArrayHeaderHelper<
     Shape, Super, std::void_t<typename Shape::template ExtraFields<Super>>> {
   using BaseHeader = ArrayHeaderBase<Super, Shape::kLengthEqualsCapacity>;
   using type = typename Shape::template ExtraFields<BaseHeader>;
-  static_assert(std::is_base_of<BaseHeader, type>::value);
+  static_assert(std::is_base_of_v<BaseHeader, type>);
 };
 template <class Shape, class Super>
 using TaggedArrayHeader = typename TaggedArrayHeaderHelper<Shape, Super>::type;
@@ -90,7 +98,7 @@ using TaggedArrayHeader = typename TaggedArrayHeaderHelper<Shape, Super>::type;
 // Shap using V8_ARRAY_EXTRA_FIELDS.
 V8_OBJECT template <class Derived, class ShapeT, class Super = HeapObjectLayout>
 class TaggedArrayBase : public detail::TaggedArrayHeader<ShapeT, Super> {
-  static_assert(std::is_base_of<HeapObjectLayout, Super>::value);
+  static_assert(std::is_base_of_v<HeapObjectLayout, Super>);
   using ElementT = typename ShapeT::ElementT;
 
   static_assert(sizeof(TaggedMember<ElementT>) == kTaggedSize);
@@ -118,48 +126,51 @@ class TaggedArrayBase : public detail::TaggedArrayHeader<ShapeT, Super> {
  public:
   using Shape = ShapeT;
 
-  inline Tagged<ElementT> get(int index) const;
-  inline Tagged<ElementT> get(int index, RelaxedLoadTag) const;
-  inline Tagged<ElementT> get(int index, AcquireLoadTag) const;
-  inline Tagged<ElementT> get(int index, SeqCstAccessTag) const;
+  // Index is never supposed to be negative.
+  // See https://crbug.com/441221573.
 
-  inline void set(int index, Tagged<ElementT> value,
-                  WriteBarrierMode mode = kDefaultMode);
-  template <typename T = ElementT,
-            typename = std::enable_if<kSupportsSmiElements<T>>>
-  inline void set(int index, Tagged<Smi> value);
-  inline void set(int index, Tagged<ElementT> value, RelaxedStoreTag,
-                  WriteBarrierMode mode = kDefaultMode);
-  template <typename T = ElementT,
-            typename = std::enable_if<kSupportsSmiElements<T>>>
-  inline void set(int index, Tagged<Smi> value, RelaxedStoreTag);
-  inline void set(int index, Tagged<ElementT> value, ReleaseStoreTag,
-                  WriteBarrierMode mode = kDefaultMode);
-  template <typename T = ElementT,
-            typename = std::enable_if<kSupportsSmiElements<T>>>
-  inline void set(int index, Tagged<Smi> value, ReleaseStoreTag);
-  inline void set(int index, Tagged<ElementT> value, SeqCstAccessTag,
-                  WriteBarrierMode mode = kDefaultMode);
-  template <typename T = ElementT,
-            typename = std::enable_if<kSupportsSmiElements<T>>>
-  inline void set(int index, Tagged<Smi> value, SeqCstAccessTag);
+  inline Tagged<ElementT> get(uint32_t index) const;
+  inline Tagged<ElementT> get(uint32_t index, RelaxedLoadTag) const;
+  inline Tagged<ElementT> get(uint32_t index, AcquireLoadTag) const;
+  inline Tagged<ElementT> get(uint32_t index, SeqCstAccessTag) const;
 
-  inline Tagged<ElementT> swap(int index, Tagged<ElementT> value,
+  inline void set(uint32_t index, Tagged<ElementT> value,
+                  WriteBarrierMode mode = kDefaultMode);
+  template <typename T = ElementT,
+            typename = std::enable_if<kSupportsSmiElements<T>>>
+  inline void set(uint32_t index, Tagged<Smi> value);
+  inline void set(uint32_t index, Tagged<ElementT> value, RelaxedStoreTag,
+                  WriteBarrierMode mode = kDefaultMode);
+  template <typename T = ElementT,
+            typename = std::enable_if<kSupportsSmiElements<T>>>
+  inline void set(uint32_t index, Tagged<Smi> value, RelaxedStoreTag);
+  inline void set(uint32_t index, Tagged<ElementT> value, ReleaseStoreTag,
+                  WriteBarrierMode mode = kDefaultMode);
+  template <typename T = ElementT,
+            typename = std::enable_if<kSupportsSmiElements<T>>>
+  inline void set(uint32_t index, Tagged<Smi> value, ReleaseStoreTag);
+  inline void set(uint32_t index, Tagged<ElementT> value, SeqCstAccessTag,
+                  WriteBarrierMode mode = kDefaultMode);
+  template <typename T = ElementT,
+            typename = std::enable_if<kSupportsSmiElements<T>>>
+  inline void set(uint32_t index, Tagged<Smi> value, SeqCstAccessTag);
+
+  inline Tagged<ElementT> swap(uint32_t index, Tagged<ElementT> value,
                                SeqCstAccessTag,
                                WriteBarrierMode mode = kDefaultMode);
   inline Tagged<ElementT> compare_and_swap(
-      int index, Tagged<ElementT> expected, Tagged<ElementT> value,
+      uint32_t index, Tagged<ElementT> expected, Tagged<ElementT> value,
       SeqCstAccessTag, WriteBarrierMode mode = kDefaultMode);
 
   // Move vs. Copy behaves like memmove vs. memcpy: for Move, the memory
   // regions may overlap, for Copy they must not overlap.
   inline static void MoveElements(Isolate* isolate, Tagged<Derived> dst,
-                                  int dst_index, Tagged<Derived> src,
-                                  int src_index, int len,
+                                  uint32_t dst_index, Tagged<Derived> src,
+                                  uint32_t src_index, uint32_t len,
                                   WriteBarrierMode mode = kDefaultMode);
   inline static void CopyElements(Isolate* isolate, Tagged<Derived> dst,
-                                  int dst_index, Tagged<Derived> src,
-                                  int src_index, int len,
+                                  uint32_t dst_index, Tagged<Derived> src,
+                                  uint32_t src_index, uint32_t len,
                                   WriteBarrierMode mode = kDefaultMode);
 
   // Right-trim the array.
@@ -176,16 +187,13 @@ class TaggedArrayBase : public detail::TaggedArrayHeader<ShapeT, Super> {
 
   // Gives access to raw memory which stores the array's data.
   inline SlotType RawFieldOfFirstElement() const;
-  inline SlotType RawFieldOfElementAt(int index) const;
+  inline SlotType RawFieldOfElementAt(uint32_t index) const;
 
   // Maximal allowed capacity, in number of elements. Chosen s.t. the byte size
   // fits into a Smi which is necessary for being able to create a free space
   // filler.
-  // TODO(jgruber): The kMaxCapacity could be larger (`(Smi::kMaxValue -
-  // Shape::kHeaderSize) / kElementSize`), but our tests rely on a
-  // smaller maximum to avoid timeouts.
   static constexpr int kMaxCapacity = kMaxFixedArrayCapacity;
-  static_assert(Smi::IsValid(SizeFor(kMaxCapacity)));
+  static_assert(SizeFor(kMaxCapacity) <= FreeSpace::kMaxSizeInBytes);
 
   // Maximally allowed length for regular (non large object space) object.
   static constexpr int kMaxRegularCapacity =
@@ -197,7 +205,8 @@ class TaggedArrayBase : public detail::TaggedArrayHeader<ShapeT, Super> {
   static Handle<Derived> Allocate(
       IsolateT* isolate, int capacity,
       std::optional<DisallowGarbageCollection>* no_gc_out,
-      AllocationType allocation = AllocationType::kYoung);
+      AllocationType allocation = AllocationType::kYoung,
+      AllocationHint hint = AllocationHint());
 
   static constexpr int NewCapacityForIndex(int index, int old_capacity);
 
@@ -223,18 +232,25 @@ V8_OBJECT class FixedArray
  public:
   template <class IsolateT>
   static inline Handle<FixedArray> New(
-      IsolateT* isolate, int capacity,
-      AllocationType allocation = AllocationType::kYoung);
+      IsolateT* isolate, int length,
+      AllocationType allocation = AllocationType::kYoung,
+      AllocationHint hint = AllocationHint());
+  template <class IsolateT, typename ElementsCallback>
+  static inline Handle<FixedArray> New(
+      IsolateT* isolate, int length, ElementsCallback elements_callback,
+      AllocationType allocation = AllocationType::kYoung,
+      AllocationHint hint = AllocationHint());
 
   using Super::CopyElements;
   using Super::MoveElements;
 
   // TODO(jgruber): Only needed for FixedArrays used as JSObject elements.
-  inline void MoveElements(Isolate* isolate, int dst_index, int src_index,
-                           int len, WriteBarrierMode mode);
-  inline void CopyElements(Isolate* isolate, int dst_index,
-                           Tagged<FixedArray> src, int src_index, int len,
+  inline void MoveElements(Isolate* isolate, uint32_t dst_index,
+                           uint32_t src_index, uint32_t len,
                            WriteBarrierMode mode);
+  inline void CopyElements(Isolate* isolate, uint32_t dst_index,
+                           Tagged<FixedArray> src, uint32_t src_index,
+                           uint32_t len, WriteBarrierMode mode);
 
   // Return a grown copy if the index is bigger than the array's length.
   template <template <typename> typename HandleType>
@@ -253,16 +269,16 @@ V8_OBJECT class FixedArray
         std::is_convertible_v<HandleType<FixedArray>, DirectHandle<FixedArray>>)
   static HandleType<FixedArray> RightTrimOrEmpty(Isolate* isolate,
                                                  HandleType<FixedArray> array,
-                                                 int new_length);
+                                                 uint32_t new_length);
 
   // TODO(jgruber): Only needed for FixedArrays used as JSObject elements.
-  inline void FillWithHoles(int from, int to);
+  inline void FillWithHoles(uint32_t from, uint32_t to);
 
   // For compatibility with FixedDoubleArray:
   // TODO(jgruber): Only needed for FixedArrays used as JSObject elements.
-  inline bool is_the_hole(Isolate* isolate, int index);
-  inline void set_the_hole(Isolate* isolate, int index);
-  inline void set_the_hole(ReadOnlyRoots ro_roots, int index);
+  inline bool is_the_hole(Isolate* isolate, uint32_t index);
+  inline void set_the_hole(Isolate* isolate, uint32_t index);
+  inline void set_the_hole(ReadOnlyRoots ro_roots, uint32_t index);
 
   DECL_PRINTER(FixedArray)
   DECL_VERIFIER(FixedArray)
@@ -384,7 +400,7 @@ class FixedArrayBase : public detail::ArrayHeaderBase<HeapObjectLayout, true> {
 V8_OBJECT
 template <class Derived, class ShapeT, class Super = HeapObjectLayout>
 class PrimitiveArrayBase : public detail::ArrayHeaderBase<Super, true> {
-  static_assert(std::is_base_of<HeapObjectLayout, Super>::value);
+  static_assert(std::is_base_of_v<HeapObjectLayout, Super>);
 
   using ElementT = typename ShapeT::ElementT;
   static_assert(!is_subtype_v<ElementT, Object>);
@@ -425,11 +441,8 @@ class PrimitiveArrayBase : public detail::ArrayHeaderBase<Super, true> {
   // Maximal allowed length, in number of elements. Chosen s.t. the byte size
   // fits into a Smi which is necessary for being able to create a free space
   // filler.
-  // TODO(jgruber): The kMaxLength could be larger (`(Smi::kMaxValue -
-  // sizeof(Header)) / kElementSize`), but our tests rely on a
-  // smaller maximum to avoid timeouts.
   static constexpr int kMaxLength = kMaxFixedArrayCapacity;
-  static_assert(Smi::IsValid(SizeFor(kMaxLength)));
+  static_assert(SizeFor(kMaxLength) <= FreeSpace::kMaxSizeInBytes);
 
   // Maximally allowed length for regular (non large object space) object.
   static constexpr int kMaxRegularLength =
@@ -441,7 +454,8 @@ class PrimitiveArrayBase : public detail::ArrayHeaderBase<Super, true> {
   static Handle<Derived> Allocate(
       IsolateT* isolate, int length,
       std::optional<DisallowGarbageCollection>* no_gc_out,
-      AllocationType allocation = AllocationType::kYoung);
+      AllocationType allocation = AllocationType::kYoung,
+      AllocationAlignment alignment = kTaggedAligned);
 
   inline bool IsInBounds(int index) const;
 
@@ -464,29 +478,34 @@ V8_OBJECT class FixedDoubleArray
   // empty_fixed_array.
   template <class IsolateT>
   static inline Handle<FixedArrayBase> New(
-      IsolateT* isolate, int capacity,
+      IsolateT* isolate, int length,
+      AllocationType allocation = AllocationType::kYoung);
+  template <class IsolateT, typename ElementsCallback>
+  static inline Handle<FixedArrayBase> New(
+      IsolateT* isolate, int length, ElementsCallback elements_callback,
       AllocationType allocation = AllocationType::kYoung);
 
   // Setter and getter for elements.
-  inline double get_scalar(int index);
-  inline uint64_t get_representation(int index);
-  static inline Handle<Object> get(Tagged<FixedDoubleArray> array, int index,
-                                   Isolate* isolate);
-  inline void set(int index, double value);
-#ifdef V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
-  inline void set_undefined(int index);
-  inline bool is_undefined(int index);
-#endif  // V8_ENABLE_EXPERIMENTAL_UNDEFINED_DOUBLE
+  inline double get_scalar(uint32_t index);
+  inline uint64_t get_representation(uint32_t index);
+  static inline Handle<Object> get(Tagged<FixedDoubleArray> array,
+                                   uint32_t index, Isolate* isolate);
+  inline void set(uint32_t index, double value);
+#ifdef V8_ENABLE_UNDEFINED_DOUBLE
+  inline void set_undefined(uint32_t index);
+  inline bool is_undefined(uint32_t index);
+#endif  // V8_ENABLE_UNDEFINED_DOUBLE
 
-  inline void set_the_hole(Isolate* isolate, int index);
-  inline void set_the_hole(int index);
-  inline bool is_the_hole(Isolate* isolate, int index);
-  inline bool is_the_hole(int index);
+  inline void set_the_hole(Isolate* isolate, uint32_t index);
+  inline void set_the_hole(uint32_t index);
+  inline bool is_the_hole(Isolate* isolate, uint32_t index);
+  inline bool is_the_hole(uint32_t index);
 
-  inline void MoveElements(Isolate* isolate, int dst_index, int src_index,
-                           int len, WriteBarrierMode /* unused */);
+  inline void MoveElements(Isolate* isolate, uint32_t dst_index,
+                           uint32_t src_index, uint32_t len,
+                           WriteBarrierMode /* unused */);
 
-  inline void FillWithHoles(int from, int to);
+  inline void FillWithHoles(uint32_t from, uint32_t to);
 
   DECL_PRINTER(FixedDoubleArray)
   DECL_VERIFIER(FixedDoubleArray)
@@ -587,7 +606,6 @@ V8_OBJECT class ProtectedWeakFixedArray
 class WeakArrayList
     : public TorqueGeneratedWeakArrayList<WeakArrayList, HeapObject> {
  public:
-  NEVER_READ_ONLY_SPACE
   DECL_PRINTER(WeakArrayList)
 
   V8_EXPORT_PRIVATE static Handle<WeakArrayList> AddToEnd(
@@ -624,6 +642,9 @@ class WeakArrayList
                   WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
   inline void Set(int index, Tagged<Smi> value);
 
+  using TorqueGeneratedWeakArrayList<WeakArrayList, HeapObject>::capacity;
+  inline int capacity(RelaxedLoadTag) const;
+
   static constexpr int SizeForCapacity(int capacity) {
     return SizeFor(capacity);
   }
@@ -635,9 +656,9 @@ class WeakArrayList
   // Gives access to raw memory which stores the array's data.
   inline MaybeObjectSlot data_start();
 
-  inline void CopyElements(Isolate* isolate, int dst_index,
-                           Tagged<WeakArrayList> src, int src_index, int len,
-                           WriteBarrierMode mode);
+  inline void CopyElements(Isolate* isolate, uint32_t dst_index,
+                           Tagged<WeakArrayList> src, uint32_t src_index,
+                           uint32_t len, WriteBarrierMode mode);
 
   V8_EXPORT_PRIVATE bool IsFull() const;
 
@@ -772,7 +793,8 @@ V8_OBJECT class ByteArray
   template <class IsolateT>
   static inline Handle<ByteArray> New(
       IsolateT* isolate, int capacity,
-      AllocationType allocation = AllocationType::kYoung);
+      AllocationType allocation = AllocationType::kYoung,
+      AllocationAlignment alignment = kTaggedAligned);
 
   inline uint32_t get_int(int offset) const;
   inline void set_int(int offset, uint32_t value);
@@ -837,7 +859,7 @@ class TrustedByteArray
 V8_OBJECT
 template <typename T, typename Base>
 class FixedIntegerArrayBase : public Base {
-  static_assert(std::is_integral<T>::value);
+  static_assert(std::is_integral_v<T>);
 
  public:
   // {MoreArgs...} allows passing the `AllocationType` if `Base` is `ByteArray`.
@@ -945,9 +967,12 @@ V8_OBJECT
 template <class T>
 class TrustedPodArray : public PodArrayBase<T, TrustedByteArray> {
  public:
-  static DirectHandle<TrustedPodArray<T>> New(Isolate* isolate, int length);
-  static DirectHandle<TrustedPodArray<T>> New(LocalIsolate* isolate,
-                                              int length);
+  static DirectHandle<TrustedPodArray<T>> New(
+      Isolate* isolate, int length,
+      AllocationType allocation = AllocationType::kTrusted);
+  static DirectHandle<TrustedPodArray<T>> New(
+      LocalIsolate* isolate, int length,
+      AllocationType allocation = AllocationType::kTrusted);
 } V8_OBJECT_END;
 
 }  // namespace v8::internal

@@ -13,11 +13,9 @@ namespace node::crypto {
 constexpr unsigned kChaCha20Poly1305AuthTagLength = 16;
 
 struct ChaCha20Poly1305CipherConfig final : public MemoryRetainer {
-  CryptoJobMode mode;
   ncrypto::Cipher cipher;
   ByteSource iv;
   ByteSource additional_data;
-  ByteSource tag;
 
   ChaCha20Poly1305CipherConfig() = default;
 

@@ -5,7 +5,7 @@ const pacote = require('pacote')
 const Arborist = require('@npmcli/arborist')
 const path = require('node:path')
 const fs = require('node:fs')
-const { githubIdToken, gitlabIdToken, oidcPublishTest, mockOidc } = require('../../fixtures/mock-oidc')
+const { circleciIdToken, githubIdToken, gitlabIdToken, oidcPublishTest, mockOidc } = require('../../fixtures/mock-oidc')
 const { sigstoreIdToken } = require('@npmcli/mock-registry/lib/provenance')
 const mockGlobals = require('@npmcli/mock-globals')
 
@@ -55,7 +55,7 @@ t.test('respects publishConfig.registry, runs appropriate scripts', async t => {
   t.equal(fs.existsSync(path.join(prefix, 'scripts-prepublish')), false, 'did not run prepublish')
   t.equal(fs.existsSync(path.join(prefix, 'scripts-publish')), true, 'ran publish')
   t.equal(fs.existsSync(path.join(prefix, 'scripts-postpublish')), true, 'ran postpublish')
-  t.same(logs.warn, ['Unknown publishConfig config "other". This will stop working in the next major version of npm.'])
+  t.same(logs.warn, ['Unknown publishConfig config "other". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.'])
 })
 
 t.test('re-loads publishConfig.registry if added during script process', async t => {
@@ -150,6 +150,25 @@ t.test('dry-run', async t => {
   t.equal(joinedOutput(), `+ ${pkg}@1.0.0`)
   t.matchSnapshot(logs.notice)
 })
+
+for (const allowDirectory of ['none', 'root']) {
+  t.test(`dry-run with allow-directory=${allowDirectory}`, async t => {
+    const { joinedOutput, npm, registry } = await loadNpmWithRegistry(t, {
+      config: {
+        'allow-directory': allowDirectory,
+        'dry-run': true,
+        ...auth,
+      },
+      prefixDir: {
+        'package.json': JSON.stringify(pkgJson, null, 2),
+      },
+      authorization: token,
+    })
+    registry.publish(pkg, { noPut: true })
+    await npm.exec('publish', [])
+    t.equal(joinedOutput(), `+ ${pkg}@1.0.0`)
+  })
+}
 
 t.test('foreground-scripts defaults to true', async t => {
   const { outputs, npm, logs, registry } = await loadNpmWithRegistry(t, {
@@ -563,7 +582,7 @@ t.test('workspaces', t => {
     t.matchSnapshot(joinedOutput(), 'all workspaces in json')
   })
 
-  t.test('differet package spec', async t => {
+  t.test('different package spec', async t => {
     const testDir = {
       'package.json': JSON.stringify(
         {
@@ -730,6 +749,27 @@ t.test('restricted access', async t => {
     config: {
       ...auth,
       access: 'restricted',
+    },
+    prefixDir: {
+      'package.json': JSON.stringify(packageJson, null, 2),
+    },
+    authorization: token,
+  })
+  registry.publish('@npm/test-package', { packageJson, access: 'restricted' })
+  await npm.exec('publish', [])
+  t.matchSnapshot(joinedOutput(), 'new package version')
+  t.matchSnapshot(logs.notice)
+})
+
+t.test('private access', async t => {
+  const packageJson = {
+    name: '@npm/test-package',
+    version: '1.0.0',
+  }
+  const { npm, joinedOutput, logs, registry } = await loadNpmWithRegistry(t, {
+    config: {
+      ...auth,
+      access: 'private',
     },
     prefixDir: {
       'package.json': JSON.stringify(packageJson, null, 2),
@@ -1191,7 +1231,7 @@ t.test('oidc token exchange - no provenance', t => {
       constructor (...args) {
         const [url] = args
         if (url === ACTIONS_ID_TOKEN_REQUEST_URL) {
-          throw 'Specifically throwing a non errror object to test global try-catch'
+          throw 'Specifically throwing a non error object to test global try-catch'
         }
         super(...args)
       }
@@ -1213,6 +1253,35 @@ t.test('oidc token exchange - no provenance', t => {
     },
     mockOidcTokenExchangeOptions: {
       idToken: gitlabPrivateIdToken,
+      body: {
+        token: 'exchange-token',
+      },
+    },
+    publishOptions: {
+      token: 'exchange-token',
+    },
+  }))
+
+  t.test('circleci missing NPM_ID_TOKEN', oidcPublishTest({
+    oidcOptions: { circleci: true, NPM_ID_TOKEN: '' },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    publishOptions: {
+      token: 'existing-fallback-token',
+    },
+    logsContain: [
+      'silly oidc Skipped because no id_token available',
+    ],
+  }))
+
+  t.test('default registry success circleci', oidcPublishTest({
+    oidcOptions: { circleci: true, NPM_ID_TOKEN: circleciIdToken() },
+    config: {
+      '//registry.npmjs.org/:_authToken': 'existing-fallback-token',
+    },
+    mockOidcTokenExchangeOptions: {
+      idToken: circleciIdToken(),
       body: {
         token: 'exchange-token',
       },
@@ -1573,4 +1642,38 @@ t.test('oidc token exchange - provenance', (t) => {
   })
 
   t.end()
+})
+
+t.test('passes script-shell config to lifecycle hooks', async t => {
+  const CAPTURED = []
+  const { npm, registry } = await loadNpmWithRegistry(t, {
+    config: {
+      ...auth,
+      'script-shell': '/bin/bash',
+    },
+    prefixDir: {
+      'package.json': JSON.stringify({
+        ...pkgJson,
+        scripts: {
+          prepublishOnly: 'exit 0',
+          publish: 'exit 0',
+          postpublish: 'exit 0',
+        },
+      }),
+    },
+    mocks: {
+      '@npmcli/run-script': async (opts) => {
+        CAPTURED.push(opts)
+      },
+    },
+  })
+
+  registry.publish(pkg, {})
+  await npm.exec('publish', [])
+
+  for (const event of ['prepublishOnly', 'publish', 'postpublish']) {
+    const rs = CAPTURED.find(r => r.event === event)
+    t.ok(rs, `ran ${event}`)
+    t.equal(rs?.scriptShell, '/bin/bash', `${event} receives scriptShell`)
+  }
 })

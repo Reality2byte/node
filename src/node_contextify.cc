@@ -23,6 +23,7 @@
 
 #include "base_object-inl.h"
 #include "cppgc/allocation.h"
+#include "debug_utils-inl.h"
 #include "memory_tracker-inl.h"
 #include "module_wrap.h"
 #include "node_context_data.h"
@@ -45,6 +46,7 @@ using v8::Array;
 using v8::ArrayBufferView;
 using v8::Boolean;
 using v8::Context;
+using v8::DictionaryTemplate;
 using v8::EscapableHandleScope;
 using v8::Function;
 using v8::FunctionCallbackInfo;
@@ -84,9 +86,38 @@ using v8::ScriptCompiler;
 using v8::ScriptOrigin;
 using v8::String;
 using v8::Symbol;
-using v8::Uint32;
 using v8::UnboundScript;
 using v8::Value;
+
+// This is a helper function mediates deleted v8::PropertyDescriptor copy/move.
+// The `Fn` receives a mutable reference of a stack allocated
+// PropertyDescriptor, copied from the passed in const reference of
+// PropertyDescriptor.
+template <typename Fn>
+auto WithPropertyDescriptorCopied(Isolate* isolate,
+                                  const PropertyDescriptor& desc,
+                                  Fn&& callback) {
+  auto apply_attrs = [&](PropertyDescriptor& d) {
+    if (desc.has_enumerable()) d.set_enumerable(desc.enumerable());
+    if (desc.has_configurable()) d.set_configurable(desc.configurable());
+    return callback(d);
+  };
+  if (desc.has_get() || desc.has_set()) {
+    PropertyDescriptor d(
+        desc.has_get() ? desc.get() : Undefined(isolate).As<Value>(),
+        desc.has_set() ? desc.set() : Undefined(isolate).As<Value>());
+    return apply_attrs(d);
+  } else if (desc.has_value()) {
+    if (desc.has_writable()) {
+      PropertyDescriptor d(desc.value(), desc.writable());
+      return apply_attrs(d);
+    }
+    PropertyDescriptor d(desc.value());
+    return apply_attrs(d);
+  }
+  PropertyDescriptor d;
+  return apply_attrs(d);
+}
 
 // The vm module executes code in a sandboxed environment with a different
 // global object than the rest of the code. This is achieved by applying
@@ -107,15 +138,6 @@ using v8::Value;
 //
 // For every `set` of a global property, the interceptor callback defines or
 // changes the property both on the sandbox and the global proxy.
-
-namespace {
-
-// Convert an int to a V8 Name (String or Symbol).
-MaybeLocal<String> Uint32ToName(Local<Context> context, uint32_t index) {
-  return Uint32::New(context->GetIsolate(), index)->ToString(context);
-}
-
-}  // anonymous namespace
 
 ContextifyContext* ContextifyContext::New(Environment* env,
                                           Local<Object> sandbox_obj,
@@ -163,9 +185,12 @@ ContextifyContext::ContextifyContext(Environment* env,
   // This should only be done after the initial initializations of the context
   // global object is finished.
   DCHECK_NULL(v8_context->GetAlignedPointerFromEmbedderData(
-      ContextEmbedderIndex::kContextifyContext));
+      ContextEmbedderIndex::kContextifyContext,
+      EmbedderDataTag::kPerContextData));
   v8_context->SetAlignedPointerInEmbedderData(
-      ContextEmbedderIndex::kContextifyContext, this);
+      ContextEmbedderIndex::kContextifyContext,
+      this,
+      EmbedderDataTag::kPerContextData);
 }
 
 void ContextifyContext::InitializeGlobalTemplates(IsolateData* isolate_data) {
@@ -175,16 +200,18 @@ void ContextifyContext::InitializeGlobalTemplates(IsolateData* isolate_data) {
   Local<ObjectTemplate> global_object_template =
       global_func_template->InstanceTemplate();
 
-  NamedPropertyHandlerConfiguration config(
-      PropertyGetterCallback,
-      PropertySetterCallback,
-      PropertyQueryCallback,
-      PropertyDeleterCallback,
-      PropertyEnumeratorCallback,
-      PropertyDefinerCallback,
-      PropertyDescriptorCallback,
-      {},
-      PropertyHandlerFlags::kHasNoSideEffect);
+  PropertyHandlerFlags flags = static_cast<PropertyHandlerFlags>(
+      static_cast<int>(PropertyHandlerFlags::kHasNoSideEffect) |
+      static_cast<int>(PropertyHandlerFlags::kHasDontDeleteProperty));
+  NamedPropertyHandlerConfiguration config(PropertyGetterCallback,
+                                           PropertySetterCallback,
+                                           PropertyQueryCallback,
+                                           PropertyDeleterCallback,
+                                           PropertyEnumeratorCallback,
+                                           PropertyDefinerCallback,
+                                           PropertyDescriptorCallback,
+                                           {},
+                                           flags);
 
   IndexedPropertyHandlerConfiguration indexed_config(
       IndexedPropertyGetterCallback,
@@ -195,7 +222,7 @@ void ContextifyContext::InitializeGlobalTemplates(IsolateData* isolate_data) {
       IndexedPropertyDefinerCallback,
       IndexedPropertyDescriptorCallback,
       {},
-      PropertyHandlerFlags::kHasNoSideEffect);
+      flags);
 
   global_object_template->SetHandler(config);
   global_object_template->SetHandler(indexed_config);
@@ -459,7 +486,7 @@ ContextifyContext* ContextifyContext::Get(const PropertyCallbackInfo<T>& args) {
   // args.GetIsolate()->GetCurrentContext() and take the pointer at
   // ContextEmbedderIndex::kContextifyContext, as V8 is supposed to
   // push the creation context before invoking these callbacks.
-  return Get(args.This());
+  return Get(args.HolderV2());
 }
 
 ContextifyContext* ContextifyContext::Get(Local<Object> object) {
@@ -472,7 +499,8 @@ ContextifyContext* ContextifyContext::Get(Local<Object> object) {
   }
   return static_cast<ContextifyContext*>(
       context->GetAlignedPointerFromEmbedderData(
-          ContextEmbedderIndex::kContextifyContext));
+          ContextEmbedderIndex::kContextifyContext,
+          EmbedderDataTag::kPerContextData));
 }
 
 bool ContextifyContext::IsStillInitializing(const ContextifyContext* ctx) {
@@ -489,18 +517,21 @@ Intercepted ContextifyContext::PropertyQueryCallback(
     return Intercepted::kNo;
   }
 
+  per_process::Debug(
+      DebugCategory::CONTEXTIFY, "PropertyQuery(%s)\n", property);
+
   Local<Context> context = ctx->context();
   Local<Object> sandbox = ctx->sandbox();
 
   PropertyAttribute attr;
 
-  Maybe<bool> maybe_has = sandbox->HasRealNamedProperty(context, property);
+  Maybe<bool> maybe_has = sandbox->HasOwnProperty(context, property);
   if (maybe_has.IsNothing()) {
     return Intercepted::kNo;
   } else if (maybe_has.FromJust()) {
-    Maybe<PropertyAttribute> maybe_attr =
-        sandbox->GetRealNamedPropertyAttributes(context, property);
-    if (!maybe_attr.To(&attr)) {
+    Maybe<bool> maybe_attr =
+        sandbox->GetPropertyAttributes(context, property, &attr);
+    if (!maybe_attr.FromMaybe(false)) {
       return Intercepted::kNo;
     }
     args.GetReturnValue().Set(attr);
@@ -534,6 +565,9 @@ Intercepted ContextifyContext::PropertyGetterCallback(
   if (IsStillInitializing(ctx)) {
     return Intercepted::kNo;
   }
+
+  per_process::Debug(
+      DebugCategory::CONTEXTIFY, "PropertyGetter(name: %s)\n", property);
 
   Local<Context> context = ctx->context();
   Local<Object> sandbox = ctx->sandbox();
@@ -572,6 +606,12 @@ Intercepted ContextifyContext::PropertySetterCallback(
     return Intercepted::kNo;
   }
 
+  per_process::Debug(DebugCategory::CONTEXTIFY,
+                     "PropertySetter(name: %s, value: %s), use-strict(%s)\n",
+                     property,
+                     value,
+                     args.ShouldThrowOnError());
+
   Local<Context> context = ctx->context();
   PropertyAttribute attributes = PropertyAttribute::None;
   bool is_declared_on_global_proxy = ctx->global_proxy()
@@ -592,26 +632,7 @@ Intercepted ContextifyContext::PropertySetterCallback(
     return Intercepted::kNo;
   }
 
-  // true for x = 5
-  // false for this.x = 5
-  // false for Object.defineProperty(this, 'foo', ...)
-  // false for vmResult.x = 5 where vmResult = vm.runInContext();
-  bool is_contextual_store = ctx->global_proxy() != args.This();
-
-  // Indicator to not return before setting (undeclared) function declarations
-  // on the sandbox in strict mode, i.e. args.ShouldThrowOnError() = true.
-  // True for 'function f() {}', 'this.f = function() {}',
-  // 'var f = function()'.
-  // In effect only for 'function f() {}' because
-  // var f = function(), is_declared = true
-  // this.f = function() {}, is_contextual_store = false.
-  bool is_function = value->IsFunction();
-
   bool is_declared = is_declared_on_global_proxy || is_declared_on_sandbox;
-  if (!is_declared && args.ShouldThrowOnError() && is_contextual_store &&
-      !is_function) {
-    return Intercepted::kNo;
-  }
 
   if (!is_declared && property->IsSymbol()) {
     return Intercepted::kNo;
@@ -649,6 +670,9 @@ Intercepted ContextifyContext::PropertyDescriptorCallback(
     return Intercepted::kNo;
   }
 
+  per_process::Debug(
+      DebugCategory::CONTEXTIFY, "PropertyDescriptor(name: %s)\n", property);
+
   Local<Context> context = ctx->context();
 
   Local<Object> sandbox = ctx->sandbox();
@@ -675,8 +699,11 @@ Intercepted ContextifyContext::PropertyDefinerCallback(
     return Intercepted::kNo;
   }
 
+  per_process::Debug(
+      DebugCategory::CONTEXTIFY, "PropertyDefiner(name: %s)\n", property);
+
   Local<Context> context = ctx->context();
-  Isolate* isolate = context->GetIsolate();
+  Isolate* isolate = Isolate::GetCurrent();
 
   PropertyAttribute attributes = PropertyAttribute::None;
   bool is_declared =
@@ -697,42 +724,13 @@ Intercepted ContextifyContext::PropertyDefinerCallback(
 
   Local<Object> sandbox = ctx->sandbox();
 
-  auto define_prop_on_sandbox =
-      [&] (PropertyDescriptor* desc_for_sandbox) {
-        if (desc.has_enumerable()) {
-          desc_for_sandbox->set_enumerable(desc.enumerable());
-        }
-        if (desc.has_configurable()) {
-          desc_for_sandbox->set_configurable(desc.configurable());
-        }
-        // Set the property on the sandbox.
-        USE(sandbox->DefineProperty(context, property, *desc_for_sandbox));
-      };
+  auto result =
+      WithPropertyDescriptorCopied(isolate, desc, [&](PropertyDescriptor& d) {
+        return sandbox->DefineProperty(context, property, d);
+      });
 
-  if (desc.has_get() || desc.has_set()) {
-    PropertyDescriptor desc_for_sandbox(
-        desc.has_get() ? desc.get() : Undefined(isolate).As<Value>(),
-        desc.has_set() ? desc.set() : Undefined(isolate).As<Value>());
-
-    define_prop_on_sandbox(&desc_for_sandbox);
-    // TODO(https://github.com/nodejs/node/issues/52634): this should return
-    // kYes to behave according to the expected semantics.
-    return Intercepted::kNo;
-  } else {
-    Local<Value> value =
-        desc.has_value() ? desc.value() : Undefined(isolate).As<Value>();
-
-    if (desc.has_writable()) {
-      PropertyDescriptor desc_for_sandbox(value, desc.writable());
-      define_prop_on_sandbox(&desc_for_sandbox);
-    } else {
-      PropertyDescriptor desc_for_sandbox(value);
-      define_prop_on_sandbox(&desc_for_sandbox);
-    }
-    // TODO(https://github.com/nodejs/node/issues/52634): this should return
-    // kYes to behave according to the expected semantics.
-    return Intercepted::kNo;
-  }
+  if (result.FromMaybe(false)) return Intercepted::kYes;
+  return Intercepted::kNo;
 }
 
 // static
@@ -744,6 +742,9 @@ Intercepted ContextifyContext::PropertyDeleterCallback(
   if (IsStillInitializing(ctx)) {
     return Intercepted::kNo;
   }
+
+  per_process::Debug(
+      DebugCategory::CONTEXTIFY, "PropertyDeleter(name: %s)\n", property);
 
   Maybe<bool> success = ctx->sandbox()->Delete(ctx->context(), property);
 
@@ -771,6 +772,8 @@ void ContextifyContext::PropertyEnumeratorCallback(
 
   // Still initializing
   if (IsStillInitializing(ctx)) return;
+
+  per_process::Debug(DebugCategory::CONTEXTIFY, "PropertyEnumerator()\n");
 
   Local<Array> properties;
   // Only get own named properties, exclude indices.
@@ -802,6 +805,9 @@ void ContextifyContext::IndexedPropertyEnumeratorCallback(
 
   // Still initializing
   if (IsStillInitializing(ctx)) return;
+
+  per_process::Debug(DebugCategory::CONTEXTIFY,
+                     "IndexedPropertyEnumerator()\n");
 
   Local<Array> properties;
 
@@ -844,11 +850,8 @@ Intercepted ContextifyContext::IndexedPropertyQueryCallback(
     return Intercepted::kNo;
   }
 
-  Local<String> name;
-  if (Uint32ToName(ctx->context(), index).ToLocal(&name)) {
-    return ContextifyContext::PropertyQueryCallback(name, args);
-  }
-  return Intercepted::kNo;
+  Local<String> name = Uint32ToString(ctx->context(), index);
+  return ContextifyContext::PropertyQueryCallback(name, args);
 }
 
 // static
@@ -861,11 +864,8 @@ Intercepted ContextifyContext::IndexedPropertyGetterCallback(
     return Intercepted::kNo;
   }
 
-  Local<String> name;
-  if (Uint32ToName(ctx->context(), index).ToLocal(&name)) {
-    return ContextifyContext::PropertyGetterCallback(name, args);
-  }
-  return Intercepted::kNo;
+  Local<String> name = Uint32ToString(ctx->context(), index);
+  return ContextifyContext::PropertyGetterCallback(name, args);
 }
 
 Intercepted ContextifyContext::IndexedPropertySetterCallback(
@@ -879,11 +879,8 @@ Intercepted ContextifyContext::IndexedPropertySetterCallback(
     return Intercepted::kNo;
   }
 
-  Local<String> name;
-  if (Uint32ToName(ctx->context(), index).ToLocal(&name)) {
-    return ContextifyContext::PropertySetterCallback(name, value, args);
-  }
-  return Intercepted::kNo;
+  Local<String> name = Uint32ToString(ctx->context(), index);
+  return ContextifyContext::PropertySetterCallback(name, value, args);
 }
 
 // static
@@ -896,11 +893,8 @@ Intercepted ContextifyContext::IndexedPropertyDescriptorCallback(
     return Intercepted::kNo;
   }
 
-  Local<String> name;
-  if (Uint32ToName(ctx->context(), index).ToLocal(&name)) {
-    return ContextifyContext::PropertyDescriptorCallback(name, args);
-  }
-  return Intercepted::kNo;
+  Local<String> name = Uint32ToString(ctx->context(), index);
+  return ContextifyContext::PropertyDescriptorCallback(name, args);
 }
 
 Intercepted ContextifyContext::IndexedPropertyDefinerCallback(
@@ -914,11 +908,8 @@ Intercepted ContextifyContext::IndexedPropertyDefinerCallback(
     return Intercepted::kNo;
   }
 
-  Local<String> name;
-  if (Uint32ToName(ctx->context(), index).ToLocal(&name)) {
-    return ContextifyContext::PropertyDefinerCallback(name, desc, args);
-  }
-  return Intercepted::kNo;
+  Local<String> name = Uint32ToString(ctx->context(), index);
+  return ContextifyContext::PropertyDefinerCallback(name, desc, args);
 }
 
 // static
@@ -1088,14 +1079,15 @@ void ContextifyScript::New(const FunctionCallbackInfo<Value>& args) {
     new_cached_data.reset(ScriptCompiler::CreateCodeCache(v8_script));
   }
 
+  auto self = args.This();
+
   if (contextify_script->object()
           ->SetPrivate(context, env->host_defined_option_symbol(), id_symbol)
           .IsNothing()) {
     return;
   }
-
   if (StoreCodeCacheResult(env,
-                           args.This(),
+                           self,
                            compile_options,
                            source,
                            produce_cached_data,
@@ -1103,20 +1095,18 @@ void ContextifyScript::New(const FunctionCallbackInfo<Value>& args) {
           .IsNothing()) {
     return;
   }
-
-  if (args.This()
-          ->Set(env->context(),
+  if (self->Set(env->context(),
                 env->source_url_string(),
                 v8_script->GetSourceURL())
-          .IsNothing())
+          .IsNothing()) {
     return;
-
-  if (args.This()
-          ->Set(env->context(),
+  }
+  if (self->Set(env->context(),
                 env->source_map_url_string(),
                 v8_script->GetSourceMappingURL())
-          .IsNothing())
+          .IsNothing()) {
     return;
+  }
 
   TRACE_EVENT_END0(TRACING_CATEGORY_NODE2(vm, script), "ContextifyScript::New");
 }
@@ -1566,25 +1556,35 @@ MaybeLocal<Object> ContextifyFunction::CompileFunctionAndCacheResult(
     return {};
   }
 
-  Isolate* isolate = env->isolate();
-  Local<Object> result = Object::New(isolate);
-  if (result->Set(parsing_context, env->function_string(), fn).IsNothing())
-    return {};
-
-  // ScriptOrigin::ResourceName() returns SourceURL magic comment content if
-  // present.
-  if (result
-          ->Set(parsing_context,
-                env->source_url_string(),
-                fn->GetScriptOrigin().ResourceName())
-          .IsNothing()) {
-    return {};
+  auto tmpl = env->compiled_function_template();
+  if (tmpl.IsEmpty()) {
+    static constexpr std::string_view names[] = {
+        "function",
+        "sourceURL",
+        "sourceMapURL",
+        "cachedDataRejected",
+        "cachedDataProduced",
+        "cachedData",
+    };
+    tmpl = DictionaryTemplate::New(env->isolate(), names);
+    env->set_compiled_function_template(tmpl);
   }
-  if (result
-          ->Set(parsing_context,
-                env->source_map_url_string(),
-                fn->GetScriptOrigin().SourceMapUrl())
-          .IsNothing()) {
+
+  auto scriptOrigin = fn->GetScriptOrigin();
+  MaybeLocal<Value> values[] = {
+      fn,
+      // ScriptOrigin::ResourceName() returns SourceURL magic comment content if
+      // present.
+      scriptOrigin.ResourceName(),
+      scriptOrigin.SourceMapUrl(),
+      // These are conditionally filled in by StoreCodeCacheResult below.
+      Undefined(env->isolate()),  // cachedDataRejected
+      Undefined(env->isolate()),  // cachedDataProduced
+      Undefined(env->isolate()),  // cachedData
+  };
+
+  Local<Object> result;
+  if (!NewDictionaryInstance(env->context(), tmpl, values).ToLocal(&result)) {
     return {};
   }
 
@@ -1655,13 +1655,13 @@ static MaybeLocal<Function> CompileFunctionForCJSLoader(
     Local<String> filename,
     bool* cache_rejected,
     bool is_cjs_scope,
-    ScriptCompiler::CachedData* cached_data) {
-  Isolate* isolate = context->GetIsolate();
+    ScriptCompiler::CachedData* cached_data,
+    Local<Symbol> host_defined_option_symbol) {
+  Isolate* isolate = Isolate::GetCurrent();
   EscapableHandleScope scope(isolate);
 
-  Local<Symbol> symbol = env->vm_dynamic_import_default_internal();
-  Local<PrimitiveArray> hdo =
-      loader::ModuleWrap::GetHostDefinedOptions(isolate, symbol);
+  Local<PrimitiveArray> hdo = loader::ModuleWrap::GetHostDefinedOptions(
+      isolate, host_defined_option_symbol);
   ScriptOrigin origin(filename,
                       0,               // line offset
                       0,               // column offset
@@ -1754,6 +1754,12 @@ static void CompileFunctionForCJSLoader(
   Realm* realm = Realm::GetCurrent(context);
   Environment* env = realm->env();
 
+  Local<Symbol> host_defined_option_symbol =
+      env->vm_dynamic_import_default_internal();
+  if (args.Length() > 4 && args[4].As<Boolean>()->Value()) {
+    host_defined_option_symbol = env->embedder_module_hdo();
+  }
+
   bool cache_rejected = false;
   Local<Function> fn;
   Local<Value> cjs_exception;
@@ -1782,8 +1788,14 @@ static void CompileFunctionForCJSLoader(
   {
     ShouldNotAbortOnUncaughtScope no_abort_scope(realm->env());
     TryCatchScope try_catch(env);
-    if (!CompileFunctionForCJSLoader(
-             env, context, code, filename, &cache_rejected, true, cached_data)
+    if (!CompileFunctionForCJSLoader(env,
+                                     context,
+                                     code,
+                                     filename,
+                                     &cache_rejected,
+                                     true,
+                                     cached_data,
+                                     host_defined_option_symbol)
              .ToLocal(&fn)) {
       CHECK(try_catch.HasCaught());
       CHECK(!try_catch.HasTerminated());
@@ -1799,12 +1811,12 @@ static void CompileFunctionForCJSLoader(
     // be reparsed as ESM.
     Utf8Value filename_utf8(isolate, filename);
     std::string url = url::FromFilePath(filename_utf8.ToStringView());
-    Local<String> url_value;
-    if (!String::NewFromUtf8(isolate, url.c_str()).ToLocal(&url_value)) {
+    Local<Value> url_value;
+    if (!ToV8Value(context, url).ToLocal(&url_value)) {
       return;
     }
-    can_parse_as_esm =
-        ShouldRetryAsESM(realm, cjs_message->Get(), code, url_value);
+    can_parse_as_esm = ShouldRetryAsESM(
+        realm, cjs_message->Get(), code, url_value.As<String>());
     if (!can_parse_as_esm) {
       // The syntax error is not related to ESM, throw the original error.
       isolate->ThrowException(cjs_exception);
@@ -1827,15 +1839,22 @@ static void CompileFunctionForCJSLoader(
     }
   }
 
+  auto tmpl = env->compiled_function_cjs_template();
+  if (tmpl.IsEmpty()) {
+    static constexpr std::string_view names[] = {
+        "cachedDataRejected",
+        "sourceMapURL",
+        "sourceURL",
+        "function",
+        "canParseAsESM",
+    };
+    tmpl = DictionaryTemplate::New(isolate, names);
+    env->set_compiled_function_cjs_template(tmpl);
+  }
+
   Local<Value> undefined = v8::Undefined(isolate);
-  Local<Name> names[] = {
-      env->cached_data_rejected_string(),
-      env->source_map_url_string(),
-      env->source_url_string(),
-      env->function_string(),
-      FIXED_ONE_BYTE_STRING(isolate, "canParseAsESM"),
-  };
-  Local<Value> values[] = {
+
+  MaybeLocal<Value> values[] = {
       Boolean::New(isolate, cache_rejected),
       fn.IsEmpty() ? undefined : fn->GetScriptOrigin().SourceMapUrl(),
       // ScriptOrigin::ResourceName() returns SourceURL magic comment content if
@@ -1844,9 +1863,10 @@ static void CompileFunctionForCJSLoader(
       fn.IsEmpty() ? undefined : fn.As<Value>(),
       Boolean::New(isolate, can_parse_as_esm),
   };
-  Local<Object> result = Object::New(
-      isolate, v8::Null(isolate), &names[0], &values[0], arraysize(names));
-  args.GetReturnValue().Set(result);
+  Local<Object> result;
+  if (NewDictionaryInstance(env->context(), tmpl, values).ToLocal(&result)) {
+    args.GetReturnValue().Set(result);
+  }
 }
 
 bool ShouldRetryAsESM(Realm* realm,
@@ -1936,8 +1956,14 @@ static void ContainsModuleSyntax(const FunctionCallbackInfo<Value>& args) {
     Local<Function> fn;
     TryCatchScope try_catch(env);
     ShouldNotAbortOnUncaughtScope no_abort_scope(env);
-    if (CompileFunctionForCJSLoader(
-            env, context, code, filename, &cache_rejected, cjs_var, nullptr)
+    if (CompileFunctionForCJSLoader(env,
+                                    context,
+                                    code,
+                                    filename,
+                                    &cache_rejected,
+                                    cjs_var,
+                                    nullptr,
+                                    env->vm_dynamic_import_default_internal())
             .ToLocal(&fn)) {
       args.GetReturnValue().Set(false);
       return;
@@ -1950,19 +1976,32 @@ static void ContainsModuleSyntax(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(result);
 }
 
-static void StartSigintWatchdog(const FunctionCallbackInfo<Value>& args) {
-  int ret = SigintWatchdogHelper::GetInstance()->Start();
-  args.GetReturnValue().Set(ret == 0);
-}
+// Runs the JavaScript function passed as the first argument with a
+// `SigintWatchdog` active, so that a SIGINT received while the function is
+// executing terminates execution.
+static void RunInterruptible(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  Isolate* isolate = args.GetIsolate();
+  CHECK(args[0]->IsFunction());
+  Local<Function> fn = args[0].As<Function>();
 
-static void StopSigintWatchdog(const FunctionCallbackInfo<Value>& args) {
-  bool had_pending_signals = SigintWatchdogHelper::GetInstance()->Stop();
-  args.GetReturnValue().Set(had_pending_signals);
-}
+  bool received_signal = false;
+  TryCatchScope try_catch(env);
+  {
+    SigintWatchdog swd(isolate, &received_signal);
+    USE(fn->Call(env->context(), Undefined(isolate), 0, nullptr));
+  }
 
-static void WatchdogHasPendingSigint(const FunctionCallbackInfo<Value>& args) {
-  bool ret = SigintWatchdogHelper::GetInstance()->HasPendingSignal();
-  args.GetReturnValue().Set(ret);
+  // Convert the termination exception into a recoverable state.
+  if (received_signal) {
+    isolate->CancelTerminateExecution();
+  } else if (try_catch.HasCaught()) {
+    // A genuine exception (not a watchdog-triggered termination); propagate it.
+    if (!try_catch.HasTerminated()) try_catch.ReThrow();
+    return;
+  }
+
+  args.GetReturnValue().Set(received_signal);
 }
 
 static void MeasureMemory(const FunctionCallbackInfo<Value>& args) {
@@ -1996,11 +2035,7 @@ void CreatePerIsolateProperties(IsolateData* isolate_data,
   ContextifyScript::CreatePerIsolateProperties(isolate_data, target);
   ContextifyFunction::CreatePerIsolateProperties(isolate_data, target);
 
-  SetMethod(isolate, target, "startSigintWatchdog", StartSigintWatchdog);
-  SetMethod(isolate, target, "stopSigintWatchdog", StopSigintWatchdog);
-  // Used in tests.
-  SetMethodNoSideEffect(
-      isolate, target, "watchdogHasPendingSigint", WatchdogHasPendingSigint);
+  SetMethod(isolate, target, "runInterruptible", RunInterruptible);
 
   SetMethod(isolate, target, "measureMemory", MeasureMemory);
   SetMethod(isolate,
@@ -2050,9 +2085,7 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   ContextifyFunction::RegisterExternalReferences(registry);
 
   registry->Register(CompileFunctionForCJSLoader);
-  registry->Register(StartSigintWatchdog);
-  registry->Register(StopSigintWatchdog);
-  registry->Register(WatchdogHasPendingSigint);
+  registry->Register(RunInterruptible);
   registry->Register(MeasureMemory);
   registry->Register(ContainsModuleSyntax);
 }

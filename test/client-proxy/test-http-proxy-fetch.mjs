@@ -19,17 +19,17 @@ await once(proxy, 'listening');
 
 const serverHost = `localhost:${server.address().port}`;
 
-// FIXME(undici:4083): undici currently always tunnels the request over
-// CONNECT if proxyTunnel is not explicitly set to false, but what we
-// need is for it to be automatically false for HTTP requests to be
-// consistent with curl.
 const expectedLogs = [{
-  method: 'CONNECT',
-  url: serverHost,
+  method: 'GET',
+  url: `http://${serverHost}/test`,
   headers: {
-    'connection': 'close',
     'host': serverHost,
-    'proxy-connection': 'keep-alive',
+    'connection': 'keep-alive',
+    'accept': '*/*',
+    'accept-language': '*',
+    'sec-fetch-mode': 'cors',
+    'user-agent': 'node',
+    'accept-encoding': 'gzip, deflate',
   },
 }];
 

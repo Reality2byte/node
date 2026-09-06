@@ -10,6 +10,8 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 
+common.skipIfInspectorDisabled();
+
 if (process.env.TERM === 'dumb') {
   common.skip('skipping - dumb terminal');
 }
@@ -137,14 +139,12 @@ const tests = [
     expected: [prompt, replFailedRead, prompt, replDisabled, prompt]
   },
   {
-    before: function before() {
+    before: common.mustCall(function before() {
       if (common.isWindows) {
         const execSync = require('child_process').execSync;
-        execSync(`ATTRIB +H "${emptyHiddenHistoryPath}"`, (err) => {
-          assert.ifError(err);
-        });
+        execSync(`ATTRIB +H "${emptyHiddenHistoryPath}"`);
       }
-    },
+    }),
     env: { NODE_REPL_HISTORY: emptyHiddenHistoryPath },
     test: [UP],
     expected: [prompt]
@@ -216,7 +216,7 @@ function runTest(assertCleaned) {
   REPL.createInternalRepl(env, {
     input: new ActionStream(),
     output: new stream.Writable({
-      write(chunk, _, next) {
+      write: common.mustCallAtLeast((chunk, _, next) => {
         const output = chunk.toString();
 
         // Ignore escapes and blank lines
@@ -230,12 +230,12 @@ function runTest(assertCleaned) {
           throw err;
         }
         next();
-      }
+      }),
     }),
     prompt,
     useColors: false,
     terminal: true
-  }, function(err, repl) {
+  }, common.mustCall((err, repl) => {
     if (err) {
       console.error(`Failed test # ${numtests - tests.length}`);
       throw err;
@@ -250,7 +250,7 @@ function runTest(assertCleaned) {
       onClose();
     });
 
-    function onClose() {
+    const onClose = common.mustCall(() => {
       const cleaned = clean === false ? false : cleanupTmpFile();
 
       try {
@@ -261,8 +261,8 @@ function runTest(assertCleaned) {
         console.error(`Failed test # ${numtests - tests.length}`);
         throw err;
       }
-    }
+    });
 
     repl.inputStream.run(test);
-  });
+  }));
 }

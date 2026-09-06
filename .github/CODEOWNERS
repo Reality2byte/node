@@ -23,13 +23,10 @@
 /onboarding.md @nodejs/tsc
 
 # nodejs.org website
-/doc/api_assets @nodejs/nodejs-website
-/doc/template.html @nodejs/nodejs-website
 /tools/doc @nodejs/web-infra
 
 # streams
 
-/lib/_stream* @nodejs/streams
 /lib/internal/streams/* @nodejs/streams
 /lib/stream.js @nodejs/streams
 /lib/stream/* @nodejs/streams
@@ -85,6 +82,15 @@
 /lib/internal/http2/* @nodejs/http2 @nodejs/net
 /src/node_http2* @nodejs/http2 @nodejs/net
 /src/node_mem* @nodejs/http2
+
+# quic
+
+/deps/ngtcp2/* @nodejs/quic
+/doc/api/quic.md @nodejs/quic
+/lib/quic.js @nodejs/quic
+/lib/internal/quic/* @nodejs/quic
+/src/quic/* @nodejs/quic
+/test/parallel/test-quic-* @nodejs/quic
 
 # modules, including loaders
 
@@ -153,14 +159,15 @@
 /test/parallel/test-runner-* @nodejs/test_runner
 
 # Single Executable Applications
+/deps/LIEF @nodejs/single-executable
 /deps/postject @nodejs/single-executable
 /doc/api/single-executable-applications.md @nodejs/single-executable
 /doc/contributing/maintaining/maintaining-single-executable-application-support.md @nodejs/single-executable
 /src/node_sea* @nodejs/single-executable
 /test/fixtures/postject-copy @nodejs/single-executable
-/test/parallel/test-single-executable-* @nodejs/single-executable
-/test/sequential/test-single-executable-* @nodejs/single-executable
+/test/sea @nodejs/single-executable
 /tools/dep_updaters/update-postject.sh @nodejs/single-executable
+/tools/dep_updaters/update-lief.sh @nodejs/single-executable
 
 # Permission Model
 /doc/api/permissions.md @nodejs/security-wg
@@ -199,6 +206,7 @@
 /deps/ada @nodejs/url
 /lib/internal/url.js @nodejs/url
 /lib/url.js @nodejs/url
+/src/node_url_pattern.* @nodejs/url
 /src/node_url.* @nodejs/url
 /test/fixtures/wpt/url @nodejs/url
 
@@ -229,3 +237,18 @@
 /lib/path.js @nodejs/path
 /lib/path/* @nodejs/path
 /test/parallel/test-path-* @nodejs/path
+
+# userland-migrations
+/doc/api/deprecations.md @nodejs/userland-migrations
+
+# dev container
+/.devcontainer/* @nodejs/devcontainer
+/doc/contributing/using-devcontainer.md @nodejs/devcontainer
+
+# FFI
+/deps/libffi/ @nodejs/ffi
+/doc/api/ffi.md @nodejs/ffi
+/lib/ffi.js @nodejs/ffi
+/src/ffi/ @nodejs/ffi
+/src/node_ffi.* @nodejs/ffi
+/test/ffi/ @nodejs/ffi

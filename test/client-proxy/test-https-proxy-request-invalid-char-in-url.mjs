@@ -67,7 +67,7 @@ for (const testCase of testCases) {
     url: severHost,
     headers: { host: severHost },
   });
-  https.request(url, (res) => {
+  https.request(url, common.mustCall((res) => {
     res.on('error', common.mustNotCall());
     res.setEncoding('utf8');
     res.on('data', (data) => {
@@ -77,14 +77,19 @@ for (const testCase of testCases) {
       console.log(`[Proxy client] #${++counter} closed request for: ${inspect(url)}`);
       // Finished all test cases.
       if (counter === testCases.length) {
-        setImmediate(() => {
+        setImmediate(common.mustCall(() => {
           console.log('All requests completed, shutting down.');
           proxy.close();
           server.close();
           assert.deepStrictEqual(requests, expectedUrls);
-          assert.deepStrictEqual(new Set(logs), expectedProxyLogs);
-        });
+          const requestLogs = logs.filter((log) => !('error' in log));
+          // The client may reset a tunnel while the proxy is still relaying
+          // the upstream's TLS shutdown; that says nothing about the URLs.
+          const errors = logs.filter((log) => 'error' in log && log.error.code !== 'ECONNRESET');
+          assert.deepStrictEqual(new Set(requestLogs), expectedProxyLogs);
+          assert.deepStrictEqual(errors, []);
+        }));
       }
     }));
-  }).on('error', common.mustNotCall()).end();
+  })).on('error', common.mustNotCall()).end();
 }

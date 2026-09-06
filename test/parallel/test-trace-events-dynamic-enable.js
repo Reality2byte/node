@@ -4,6 +4,7 @@
 const common = require('../common');
 
 common.skipIfInspectorDisabled();
+common.skipIfPerfettoEnabled();
 
 const { isMainThread } = require('worker_threads');
 
@@ -43,10 +44,10 @@ async function test() {
 
   const events = [];
   let tracingComplete = false;
-  session.on('NodeTracing.dataCollected', (n) => {
+  session.on('NodeTracing.dataCollected', common.mustCall((n) => {
     assert.ok(n?.params?.value);
     events.push(...n.params.value);  // append the events.
-  });
+  }, 2));
   session.on('NodeTracing.tracingComplete', () => tracingComplete = true);
 
   trace(kBeforeEvent, 'foo', 'test1', 0, 'test');

@@ -5,6 +5,8 @@
 #ifndef V8_COMPILER_COMPILATION_DEPENDENCIES_H_
 #define V8_COMPILER_COMPILATION_DEPENDENCIES_H_
 
+#include <optional>
+
 #include "src/compiler/js-heap-broker.h"
 #include "src/objects/contexts.h"
 #include "src/objects/property-cell.h"
@@ -79,8 +81,9 @@ class V8_EXPORT CompilationDependencies : public ZoneObject {
   // used to mutate fields without deoptimization of the dependent code.
   PropertyConstness DependOnFieldConstness(MapRef map, MapRef owner,
                                            InternalIndex descriptor);
-  CompilationDependency const* FieldConstnessDependencyOffTheRecord(
-      MapRef map, MapRef owner, InternalIndex descriptor);
+  std::optional<CompilationDependency const*>
+  FieldConstnessDependencyOffTheRecord(MapRef map, MapRef owner,
+                                       InternalIndex descriptor);
 
   // Record the assumption that neither {cell}'s {CellType} changes, nor the
   // {IsReadOnly()} flag of {cell}'s {PropertyDetails}.
@@ -104,6 +107,7 @@ class V8_EXPORT CompilationDependencies : public ZoneObject {
   bool DependOnArrayIteratorProtector();
   bool DependOnArraySpeciesProtector();
   bool DependOnNoElementsProtector();
+  bool DependOnNoDateTimeConfigurationChangeProtector();
   bool DependOnPromiseHookProtector();
   bool DependOnPromiseSpeciesProtector();
   bool DependOnPromiseThenProtector();
@@ -111,7 +115,6 @@ class V8_EXPORT CompilationDependencies : public ZoneObject {
   bool DependOnNoProfilingProtector();
   bool DependOnNoUndetectableObjectsProtector();
   bool DependOnStringWrapperToPrimitiveProtector();
-  bool DependOnTypedArrayLengthProtector();
 
   // Record the assumption that {site}'s {ElementsKind} doesn't change.
   void DependOnElementsKind(AllocationSiteRef site);
@@ -178,6 +181,9 @@ class V8_EXPORT CompilationDependencies : public ZoneObject {
   CompilationDependency const* FieldRepresentationDependencyOffTheRecord(
       MapRef map, MapRef owner, InternalIndex descriptor,
       Representation representation) const;
+  void DependOnFieldRepresentation(MapRef map, MapRef owner,
+                                   InternalIndex descriptor,
+                                   Representation representation);
 
   // Gather the assumption that the field type of a field does not change. The
   // field is identified by the arguments.

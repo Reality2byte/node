@@ -84,13 +84,20 @@ class GCCallbacks final {
 // relocated. Note that in order to do so `Iterate()` may be invoked more than
 // once per GC.
 //
+// Users can also override `GCEpilogueInSafepoint`. This method gets called once
+// at the end of a GC.
+//
 // Note that an object implementing GCRootsProvider still needs to be registered
-// with a thread (=LocalHeap/LocalIsolate) using GCRootsProviderScope.
+// with a thread (=LocalHeap/LocalIsolate) using GCRootsProviderScope. Some
+// roots like e.g. IdentityMap are passed around between threads, such objects
+// can be registered on a global list in Heap using
+// Heap::AddGlobalGCRootsProvider.
 class GCRootsProvider {
  public:
   virtual ~GCRootsProvider() {}
 
   virtual void Iterate(RootVisitor* v) = 0;
+  virtual void GCEpilogueInSafepoint(GCType gc_type) {}
 };
 
 class GCCallbacksInSafepoint final {
@@ -150,16 +157,21 @@ class GCCallbacksInSafepoint final {
 //
 // In every GC happening inside this scope, the GC will invoke the registered
 // GCRootsProvider for all threads. See GCRootsProvider for more details.
-class GCRootsProviderScope final {
+class V8_NODISCARD GCRootsProviderScope final {
  public:
-  GCRootsProviderScope(LocalIsolate* local_isolate, GCRootsProvider* provider);
-  GCRootsProviderScope(LocalHeap* local_heap, GCRootsProvider* provider);
-  ~GCRootsProviderScope();
+  V8_INLINE GCRootsProviderScope(LocalIsolate* local_isolate,
+                                 GCRootsProvider* provider);
+  V8_INLINE GCRootsProviderScope(LocalHeap* local_heap,
+                                 GCRootsProvider* provider);
+  V8_INLINE ~GCRootsProviderScope();
 
   GCRootsProviderScope(GCRootsProviderScope&) = delete;
   GCRootsProviderScope(GCRootsProviderScope&&) = delete;
 
  private:
+#if DEBUG
+  GCRootsProvider* provider_;
+#endif
   LocalHeap* local_heap_;
 };
 

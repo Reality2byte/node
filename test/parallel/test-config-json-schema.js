@@ -10,9 +10,9 @@ if (!common.hasCrypto) {
   common.skip('missing crypto');
 }
 
-const { hasOpenSSL3 } = require('../common/crypto');
+const { hasOpenSSL } = require('../common/crypto');
 
-if (!hasOpenSSL3) {
+if (!hasOpenSSL(3)) {
   common.skip('this test requires OpenSSL 3.x');
 }
 
@@ -23,6 +23,14 @@ if (!common.hasIntl) {
 
 if (!common.hasQuic) {
   common.skip('this test requires QUIC');
+}
+
+if (process.config.variables.icu_small) {
+  common.skip('this test assumes full ICU build');
+}
+
+if (process.config.variables.node_quic) {
+  common.skip('this test assumes default configuration options');
 }
 
 const {

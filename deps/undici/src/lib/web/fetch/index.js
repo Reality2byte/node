@@ -11,7 +11,7 @@ const {
   getResponseState
 } = require('./response')
 const { HeadersList } = require('./headers')
-const { Request, cloneRequest, getRequestDispatcher, getRequestState } = require('./request')
+const { Request, cloneRequest, getRequestDispatcher, getRequestState, removeRequestAbortListener } = require('./request')
 const zlib = require('node:zlib')
 const {
   makePolicyContainer,
@@ -35,7 +35,6 @@ const {
   isErrorLike,
   fullyReadBody,
   readableStreamClose,
-  isomorphicEncode,
   urlIsLocal,
   urlIsHttpHttpsScheme,
   urlHasHttpsScheme,
@@ -43,7 +42,10 @@ const {
   simpleRangeHeaderValue,
   buildContentRange,
   createInflate,
-  extractMimeType
+  extractMimeType,
+  hasAuthenticationEntry,
+  includesCredentials,
+  isTraversableNavigable
 } = require('./util')
 const assert = require('node:assert')
 const { safelyExtractBody, extractBody } = require('./body')
@@ -57,14 +59,13 @@ const {
 const EE = require('node:events')
 const { Readable, pipeline, finished, isErrored, isReadable } = require('node:stream')
 const { addAbortListener, bufferToLowerCasedHeaderName } = require('../../core/util')
+const { SocketError } = require('../../core/errors')
 const { dataURLProcessor, serializeAMimeType, minimizeSupportedMimeType } = require('./data-url')
 const { getGlobalDispatcher } = require('../../global')
 const { webidl } = require('../webidl')
 const { STATUS_CODES } = require('node:http')
 const { bytesMatch } = require('../subresource-integrity/subresource-integrity')
-const { createDeferredPromise } = require('../../util/promise')
-
-const hasZstd = typeof zlib.createZstdDecompress === 'function'
+const { isomorphicEncode } = require('../infra')
 
 const GET_OR_HEAD = ['GET', 'HEAD']
 
@@ -74,6 +75,35 @@ const defaultUserAgent = typeof __UNDICI_IS_NODE__ !== 'undefined' || typeof esb
 
 /** @type {import('buffer').resolveObjectURL} */
 let resolveObjectURL
+
+function appendHeadersListFromResponseHeaders (headersList, headers, rawHeaders) {
+  if (Array.isArray(rawHeaders)) {
+    for (let i = 0; i < rawHeaders.length; i += 2) {
+      const nameStr = bufferToLowerCasedHeaderName(rawHeaders[i])
+      const value = rawHeaders[i + 1]
+
+      if (Array.isArray(value) && !Buffer.isBuffer(value)) {
+        for (const val of value) {
+          headersList.append(nameStr, val.toString('latin1'), true)
+        }
+      } else {
+        headersList.append(nameStr, value.toString('latin1'), true)
+      }
+    }
+
+    return
+  }
+
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        headersList.append(name, `${entry}`, true)
+      }
+    } else {
+      headersList.append(name, `${value}`, true)
+    }
+  }
+}
 
 class Fetch extends EE {
   constructor (dispatcher) {
@@ -131,7 +161,7 @@ function fetch (input, init = undefined) {
   webidl.argumentLengthCheck(arguments, 1, 'globalThis.fetch')
 
   // 1. Let p be a new promise.
-  let p = createDeferredPromise()
+  let p = Promise.withResolvers()
 
   // 2. Let requestObject be the result of invoking the initial value of
   // Request as constructor with input and init as arguments. If this throws
@@ -152,7 +182,7 @@ function fetch (input, init = undefined) {
   if (requestObject.signal.aborted) {
     // 1. Abort the fetch() call with p, request, null, and
     //    requestObject’s signal’s abort reason.
-    abortFetch(p, request, null, requestObject.signal.reason)
+    abortFetch(p, request, null, requestObject.signal.reason, null)
 
     // 2. Return p.
     return p.promise
@@ -179,7 +209,7 @@ function fetch (input, init = undefined) {
   let controller = null
 
   // 11. Add the following abort steps to requestObject’s signal:
-  addAbortListener(
+  const removeAbortListener = addAbortListener(
     requestObject.signal,
     () => {
       // 1. Set locallyAborted to true.
@@ -195,9 +225,18 @@ function fetch (input, init = undefined) {
 
       // 4. Abort the fetch() call with p, request, responseObject,
       //    and requestObject’s signal’s abort reason.
-      abortFetch(p, request, realResponse, requestObject.signal.reason)
+      abortFetch(p, request, realResponse, requestObject.signal.reason, controller.controller)
     }
   )
+
+  // Remove the `abort` listeners registered above and in the Request
+  // constructor once the fetch has settled. Without this, reusing a single
+  // signal across many requests leaks listeners and Node.js emits a
+  // MaxListenersExceededWarning. See https://github.com/nodejs/undici/issues/5285
+  const cleanupAbortListeners = () => {
+    removeAbortListener()
+    removeRequestAbortListener(requestObject)
+  }
 
   // 12. Let handleFetchDone given response response be to finalize and
   // report timing with response, globalObject, and "fetch".
@@ -222,7 +261,8 @@ function fetch (input, init = undefined) {
       // 2. Abort the fetch() call with p, request, responseObject, and
       //    deserializedError.
 
-      abortFetch(p, request, responseObject, controller.serializedAbortReason)
+      abortFetch(p, request, responseObject, controller.serializedAbortReason, controller.controller)
+      cleanupAbortListeners()
       return
     }
 
@@ -230,6 +270,7 @@ function fetch (input, init = undefined) {
     // and terminate these substeps.
     if (response.type === 'error') {
       p.reject(new TypeError('fetch failed', { cause: response.error }))
+      cleanupAbortListeners()
       return
     }
 
@@ -244,9 +285,15 @@ function fetch (input, init = undefined) {
 
   controller = fetching({
     request,
-    processResponseEndOfBody: handleFetchDone,
+    processResponseEndOfBody: (response) => {
+      handleFetchDone(response)
+      cleanupAbortListeners()
+    },
     processResponse,
-    dispatcher: getRequestDispatcher(requestObject) // undici
+    dispatcher: getRequestDispatcher(requestObject), // undici
+    // Keep requestObject alive to prevent its AbortController from being GC'd
+    // See https://github.com/nodejs/undici/issues/4627
+    requestObject
   })
 
   // 14. Return p.
@@ -322,7 +369,7 @@ function finalizeAndReportTiming (response, initiatorType = 'other') {
 const markResourceTiming = performance.markResourceTiming
 
 // https://fetch.spec.whatwg.org/#abort-fetch
-function abortFetch (p, request, responseObject, error) {
+function abortFetch (p, request, responseObject, error, controller /* undici-specific */) {
   // 1. Reject promise with error.
   if (p) {
     // We might have already resolved the promise at this stage
@@ -352,13 +399,7 @@ function abortFetch (p, request, responseObject, error) {
   // 5. If response’s body is not null and is readable, then error response’s
   // body with error.
   if (response.body?.stream != null && isReadable(response.body.stream)) {
-    response.body.stream.cancel(error).catch((err) => {
-      if (err.code === 'ERR_INVALID_STATE') {
-        // Node bug?
-        return
-      }
-      throw err
-    })
+    controller.error(error)
   }
 }
 
@@ -371,7 +412,8 @@ function fetching ({
   processResponseEndOfBody,
   processResponseConsumeBody,
   useParallelQueue = false,
-  dispatcher = getGlobalDispatcher() // undici
+  dispatcher = getGlobalDispatcher(), // undici
+  requestObject = null // Keep alive to prevent AbortController GC, see #4627
 }) {
   // Ensure that the dispatcher is set accordingly
   assert(dispatcher)
@@ -425,7 +467,9 @@ function fetching ({
     processResponseConsumeBody,
     processResponseEndOfBody,
     taskDestination,
-    crossOriginIsolatedCapability
+    crossOriginIsolatedCapability,
+    // Keep requestObject alive to prevent its AbortController from being GC'd
+    requestObject
   }
 
   // 7. If request’s body is a byte sequence, then set request’s body to
@@ -887,7 +931,7 @@ function schemeFetch (fetchParams) {
 
         // 8. Let slicedBlob be the result of invoking slice blob given blob, rangeStart,
         //    rangeEnd + 1, and type.
-        const slicedBlob = blob.slice(rangeStart, rangeEnd, type)
+        const slicedBlob = blob.slice(rangeStart, rangeEnd + 1, type)
 
         // 9. Let slicedBodyWithType be the result of safely extracting slicedBlob.
         // Note: same reason as mentioned above as to why we use extractBody
@@ -1025,7 +1069,7 @@ function fetchFinale (fetchParams, response) {
       let responseStatus = 0
 
       // 7. If fetchParams’s request’s mode is not "navigate" or response’s has-cross-origin-redirects is false:
-      if (fetchParams.request.mode !== 'navigator' || !response.hasCrossOriginRedirects) {
+      if (fetchParams.request.mode !== 'navigate' || !response.hasCrossOriginRedirects) {
         // 1. Set responseStatus to response’s status.
         responseStatus = response.status
 
@@ -1316,8 +1360,8 @@ function httpRedirectFetch (fetchParams, response) {
     request.headersList.delete('host', true)
   }
 
-  // 14. If request’s body is non-null, then set request’s body to the first return
-  // value of safely extracting request’s body’s source.
+  // 14. If request's body is non-null, then set request's body to the first return
+  // value of safely extracting request's body's source.
   if (request.body != null) {
     assert(request.body.source != null)
     request.body = safelyExtractBody(request.body.source)[0]
@@ -1388,7 +1432,16 @@ async function httpNetworkOrCacheFetch (
     // Otherwise:
 
     // 1. Set httpRequest to a clone of request.
-    httpRequest = cloneRequest(request)
+    // Implementations are encouraged to avoid teeing request’s body’s stream
+    // when request’s body’s source is null as only a single body is needed in
+    // that case. E.g., when request’s body’s source is null, redirects and
+    // authentication will end up failing the fetch.
+    if (request.body?.source != null) {
+      httpRequest = cloneRequest(request)
+    } else {
+      httpRequest = cloneRequest({ ...request, body: null })
+      httpRequest.body = request.body
+    }
 
     // 2. Set httpFetchParams to a copy of fetchParams.
     httpFetchParams = { ...fetchParams }
@@ -1428,7 +1481,10 @@ async function httpNetworkOrCacheFetch (
   //    8. If contentLengthHeaderValue is non-null, then append
   //    `Content-Length`/contentLengthHeaderValue to httpRequest’s header
   //    list.
-  if (contentLengthHeaderValue != null) {
+  if (
+    contentLengthHeaderValue != null &&
+    !httpRequest.headersList.contains('content-length', true)
+  ) {
     httpRequest.headersList.append('content-length', contentLengthHeaderValue, true)
   }
 
@@ -1514,7 +1570,7 @@ async function httpNetworkOrCacheFetch (
   //    TODO: https://github.com/whatwg/fetch/issues/1285#issuecomment-896560129
   if (!httpRequest.headersList.contains('accept-encoding', true)) {
     if (urlHasHttpsScheme(requestCurrentURL(httpRequest))) {
-      httpRequest.headersList.append('accept-encoding', 'br, gzip, deflate', true)
+      httpRequest.headersList.append('accept-encoding', 'br, gzip, deflate, zstd', true)
     } else {
       httpRequest.headersList.append('accept-encoding', 'gzip, deflate', true)
     }
@@ -1522,13 +1578,39 @@ async function httpNetworkOrCacheFetch (
 
   httpRequest.headersList.delete('host', true)
 
-  //    20. If includeCredentials is true, then:
+  //    21. If includeCredentials is true, then:
   if (includeCredentials) {
     // 1. If the user agent is not configured to block cookies for httpRequest
     // (see section 7 of [COOKIES]), then:
     // TODO: credentials
+
     // 2. If httpRequest’s header list does not contain `Authorization`, then:
-    // TODO: credentials
+    if (!httpRequest.headersList.contains('authorization', true)) {
+      // 1. Let authorizationValue be null.
+      let authorizationValue = null
+
+      // 2. If there’s an authentication entry for httpRequest and either
+      //    httpRequest’s use-URL-credentials flag is unset or httpRequest’s
+      //    current URL does not include credentials, then set
+      //    authorizationValue to authentication entry.
+      if (hasAuthenticationEntry(httpRequest) && (
+        httpRequest.useURLCredentials === undefined || !includesCredentials(requestCurrentURL(httpRequest))
+      )) {
+        // TODO
+      } else if (includesCredentials(requestCurrentURL(httpRequest)) && isAuthenticationFetch) {
+        // 3. Otherwise, if httpRequest’s current URL does include credentials
+        //    and isAuthenticationFetch is true, set authorizationValue to
+        //    httpRequest’s current URL, converted to an `Authorization` value
+        const { username, password } = requestCurrentURL(httpRequest)
+        authorizationValue = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`
+      }
+
+      // 4. If authorizationValue is non-null, then append (`Authorization`,
+      //    authorizationValue) to httpRequest’s header list.
+      if (authorizationValue !== null) {
+        httpRequest.headersList.append('Authorization', authorizationValue, false)
+      }
+    }
   }
 
   //    21. If there’s a proxy-authentication entry, use it as appropriate.
@@ -1610,10 +1692,66 @@ async function httpNetworkOrCacheFetch (
   // 13. Set response’s request-includes-credentials to includeCredentials.
   response.requestIncludesCredentials = includeCredentials
 
-  // 14. If response’s status is 401, httpRequest’s response tainting is not
-  // "cors", includeCredentials is true, and request’s window is an environment
-  // settings object, then:
-  // TODO
+  // 14. If response’s status is 401, httpRequest’s response tainting is not "cors",
+  //     includeCredentials is true, and request’s traversable for user prompts is
+  //     a traversable navigable:
+  //
+  //     In Node.js there is no traversable navigable to prompt the user, but we
+  //     still need to handle URL-embedded credentials so authentication retries
+  //     for WebSocket handshakes continue to work.
+  if (response.status === 401 && httpRequest.responseTainting !== 'cors' && includeCredentials && (
+    request.useURLCredentials !== undefined ||
+    isTraversableNavigable(request.traversableForUserPrompts)
+  )) {
+    // 2. If request’s body is non-null, then:
+    if (request.body != null) {
+      // 1. If request’s body’s source is null, then return a network error.
+      if (request.body.source == null) {
+        // Note: In Node.js, this code path should not be reached because
+        // isTraversableNavigable() returns false for non-navigable contexts.
+        // However, we handle it gracefully by returning the response instead of
+        // a network error, as we won't actually retry the request.
+        // This aligns with the Fetch spec discussion in whatwg/fetch#1132,
+        // which allows implementations flexibility when credentials can't be obtained.
+        return response
+      }
+
+      // 2. Set request’s body to the body of the result of safely extracting
+      //    request’s body’s source.
+      request.body = safelyExtractBody(request.body.source)[0]
+    }
+
+    // 3. If request’s use-URL-credentials flag is unset or isAuthenticationFetch is
+    //    true, then:
+    if (request.useURLCredentials === undefined || isAuthenticationFetch) {
+      // 1. If fetchParams is canceled, then return the appropriate network error
+      //    for fetchParams.
+      if (isCancelled(fetchParams)) {
+        return makeAppropriateNetworkError(fetchParams)
+      }
+
+      // 2. Let username and password be the result of prompting the end user for a
+      //    username and password, respectively, in request’s traversable for user prompts.
+      // TODO
+
+      // 3. Set the username given request’s current URL and username.
+      // requestCurrentURL(request).username = TODO
+
+      // 4. Set the password given request’s current URL and password.
+      // requestCurrentURL(request).password = TODO
+
+      // In browsers, the user will be prompted to enter a username/password before the request
+      // is re-sent. To prevent an infinite 401 loop, return the response for now.
+      // https://github.com/nodejs/undici/pull/4756
+      return response
+    }
+
+    // 4. Set response to the result of running HTTP-network-or-cache fetch given
+    //    fetchParams and true.
+    fetchParams.controller.connection.destroy()
+
+    response = await httpNetworkOrCacheFetch(fetchParams, true)
+  }
 
   // 15. If response’s status is 407, then:
   if (response.status === 407) {
@@ -2058,196 +2196,231 @@ async function httpNetworkFetch (
     /** @type {import('../../..').Agent} */
     const agent = fetchParams.controller.dispatcher
 
-    return new Promise((resolve, reject) => agent.dispatch(
-      {
-        path: url.pathname + url.search,
-        origin: url.origin,
-        method: request.method,
-        body: agent.isMockActive ? request.body && (request.body.source || request.body.stream) : body,
-        headers: request.headersList.entries,
-        maxRedirections: 0,
-        upgrade: request.mode === 'websocket' ? 'websocket' : undefined
-      },
-      {
-        body: null,
-        abort: null,
+    const path = url.pathname + url.search
+    const hasTrailingQuestionMark = url.search.length === 0 && url.href[url.href.length - url.hash.length - 1] === '?'
 
-        onConnect (abort) {
-          // TODO (fix): Do we need connection here?
-          const { connection } = fetchParams.controller
+    return dispatchWithProtocolPreference(body)
 
-          // Set timingInfo’s final connection timing info to the result of calling clamp and coarsen
-          // connection timing info with connection’s timing info, timingInfo’s post-redirect start
-          // time, and fetchParams’s cross-origin isolated capability.
-          // TODO: implement connection timing
-          timingInfo.finalConnectionTimingInfo = clampAndCoarsenConnectionTimingInfo(undefined, timingInfo.postRedirectStartTime, fetchParams.crossOriginIsolatedCapability)
-
-          if (connection.destroyed) {
-            abort(new DOMException('The operation was aborted.', 'AbortError'))
-          } else {
-            fetchParams.controller.on('terminated', abort)
-            this.abort = connection.abort = abort
-          }
-
-          // Set timingInfo’s final network-request start time to the coarsened shared current time given
-          // fetchParams’s cross-origin isolated capability.
-          timingInfo.finalNetworkRequestStartTime = coarsenedSharedCurrentTime(fetchParams.crossOriginIsolatedCapability)
+    function dispatchWithProtocolPreference (body, allowH2) {
+      return new Promise((resolve, reject) => agent.dispatch(
+        {
+          path: hasTrailingQuestionMark ? `${path}?` : path,
+          origin: url.origin,
+          method: request.method,
+          body: agent.isMockActive ? request.body && (request.body.source || request.body.stream) : body,
+          // Preserve the serialized fetch body for MockAgent net-connect fallthroughs.
+          __mockAgentBodyForDispatch: body,
+          headers: request.headersList.entries,
+          maxRedirections: 0,
+          upgrade: request.mode === 'websocket' ? 'websocket' : undefined,
+          ...(allowH2 === false ? { allowH2 } : null)
         },
+        {
+          body: null,
+          abort: null,
 
-        onResponseStarted () {
-          // Set timingInfo’s final network-response start time to the coarsened shared current
-          // time given fetchParams’s cross-origin isolated capability, immediately after the
-          // user agent’s HTTP parser receives the first byte of the response (e.g., frame header
-          // bytes for HTTP/2 or response status line for HTTP/1.x).
-          timingInfo.finalNetworkResponseStartTime = coarsenedSharedCurrentTime(fetchParams.crossOriginIsolatedCapability)
-        },
+          onRequestStart (controller) {
+            // TODO (fix): Do we need connection here?
+            const { connection } = fetchParams.controller
 
-        onHeaders (status, rawHeaders, resume, statusText) {
-          if (status < 200) {
-            return false
-          }
+            // Set timingInfo’s final connection timing info to the result of calling clamp and coarsen
+            // connection timing info with connection’s timing info, timingInfo’s post-redirect start
+            // time, and fetchParams’s cross-origin isolated capability.
+            // TODO: implement connection timing
+            timingInfo.finalConnectionTimingInfo = clampAndCoarsenConnectionTimingInfo(undefined, timingInfo.postRedirectStartTime, fetchParams.crossOriginIsolatedCapability)
 
-          const headersList = new HeadersList()
+            const abort = (reason) => controller.abort(reason)
 
-          for (let i = 0; i < rawHeaders.length; i += 2) {
-            headersList.append(bufferToLowerCasedHeaderName(rawHeaders[i]), rawHeaders[i + 1].toString('latin1'), true)
-          }
-          const location = headersList.get('location', true)
+            if (connection.destroyed) {
+              abort(new DOMException('The operation was aborted.', 'AbortError'))
+            } else {
+              fetchParams.controller.on('terminated', abort)
+              this.abort = connection.abort = abort
+            }
 
-          this.body = new Readable({ read: resume })
+            // Set timingInfo’s final network-request start time to the coarsened shared current time given
+            // fetchParams’s cross-origin isolated capability.
+            timingInfo.finalNetworkRequestStartTime = coarsenedSharedCurrentTime(fetchParams.crossOriginIsolatedCapability)
+          },
 
-          const willFollow = location && request.redirect === 'follow' &&
-            redirectStatusSet.has(status)
+          onResponseStarted () {
+            // Set timingInfo’s final network-response start time to the coarsened shared current
+            // time given fetchParams’s cross-origin isolated capability, immediately after the
+            // user agent’s HTTP parser receives the first byte of the response (e.g., frame header
+            // bytes for HTTP/2 or response status line for HTTP/1.x).
+            timingInfo.finalNetworkResponseStartTime = coarsenedSharedCurrentTime(fetchParams.crossOriginIsolatedCapability)
+          },
 
-          const decoders = []
+          onResponseStart (controller, status, headers, statusText) {
+            if (status < 200) {
+              return
+            }
 
-          // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Encoding
-          if (request.method !== 'HEAD' && request.method !== 'CONNECT' && !nullBodyStatus.includes(status) && !willFollow) {
-            // https://www.rfc-editor.org/rfc/rfc7231#section-3.1.2.1
-            const contentEncoding = headersList.get('content-encoding', true)
-            // "All content-coding values are case-insensitive..."
-            /** @type {string[]} */
-            const codings = contentEncoding ? contentEncoding.toLowerCase().split(',') : []
-            for (let i = codings.length - 1; i >= 0; --i) {
-              const coding = codings[i].trim()
-              // https://www.rfc-editor.org/rfc/rfc9112.html#section-7.2
-              if (coding === 'x-gzip' || coding === 'gzip') {
-                decoders.push(zlib.createGunzip({
-                  // Be less strict when decoding compressed responses, since sometimes
-                  // servers send slightly invalid responses that are still accepted
-                  // by common browsers.
-                  // Always using Z_SYNC_FLUSH is what cURL does.
-                  flush: zlib.constants.Z_SYNC_FLUSH,
-                  finishFlush: zlib.constants.Z_SYNC_FLUSH
-                }))
-              } else if (coding === 'deflate') {
-                decoders.push(createInflate({
-                  flush: zlib.constants.Z_SYNC_FLUSH,
-                  finishFlush: zlib.constants.Z_SYNC_FLUSH
-                }))
-              } else if (coding === 'br') {
-                decoders.push(zlib.createBrotliDecompress({
-                  flush: zlib.constants.BROTLI_OPERATION_FLUSH,
-                  finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH
-                }))
-              } else if (coding === 'zstd' && hasZstd) {
-              // Node.js v23.8.0+ and v22.15.0+ supports Zstandard
-                decoders.push(zlib.createZstdDecompress({
-                  flush: zlib.constants.ZSTD_e_continue,
-                  finishFlush: zlib.constants.ZSTD_e_end
-                }))
-              } else {
-                decoders.length = 0
-                break
+            const rawHeaders = controller?.rawHeaders ?? []
+            const headersList = new HeadersList()
+            appendHeadersListFromResponseHeaders(headersList, headers, rawHeaders)
+            const location = headersList.get('location', true)
+
+            this.body = new Readable({ read: () => controller.resume() })
+
+            const willFollow = location && request.redirect === 'follow' &&
+              redirectStatusSet.has(status)
+
+            const decoders = []
+
+            // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Encoding
+            if (request.method !== 'HEAD' && request.method !== 'CONNECT' && !nullBodyStatus.includes(status) && !willFollow) {
+              // https://www.rfc-editor.org/rfc/rfc7231#section-3.1.2.1
+              const contentEncoding = headersList.get('content-encoding', true)
+              // "All content-coding values are case-insensitive..."
+              /** @type {string[]} */
+              const codings = contentEncoding ? contentEncoding.toLowerCase().split(',') : []
+
+              // Limit the number of content-encodings to prevent resource exhaustion.
+              // CVE fix similar to urllib3 (GHSA-gm62-xv2j-4w53) and curl (CVE-2022-32206).
+              const maxContentEncodings = 5
+              if (codings.length > maxContentEncodings) {
+                reject(new Error(`too many content-encodings in response: ${codings.length}, maximum allowed is ${maxContentEncodings}`))
+                return
+              }
+
+              for (let i = codings.length - 1; i >= 0; --i) {
+                const coding = codings[i].trim()
+                // https://www.rfc-editor.org/rfc/rfc9112.html#section-7.2
+                if (coding === 'x-gzip' || coding === 'gzip') {
+                  decoders.push(zlib.createGunzip({
+                    // Be less strict when decoding compressed responses, since sometimes
+                    // servers send slightly invalid responses that are still accepted
+                    // by common browsers.
+                    // Always using Z_SYNC_FLUSH is what cURL does.
+                    flush: zlib.constants.Z_SYNC_FLUSH,
+                    finishFlush: zlib.constants.Z_SYNC_FLUSH
+                  }))
+                } else if (coding === 'deflate') {
+                  decoders.push(createInflate({
+                    flush: zlib.constants.Z_SYNC_FLUSH,
+                    finishFlush: zlib.constants.Z_SYNC_FLUSH
+                  }))
+                } else if (coding === 'br') {
+                  decoders.push(zlib.createBrotliDecompress({
+                    flush: zlib.constants.BROTLI_OPERATION_FLUSH,
+                    finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH
+                  }))
+                } else if (coding === 'zstd') {
+                  decoders.push(zlib.createZstdDecompress({
+                    flush: zlib.constants.ZSTD_e_continue,
+                    finishFlush: zlib.constants.ZSTD_e_end
+                  }))
+                } else {
+                  decoders.length = 0
+                  break
+                }
               }
             }
+
+            const onError = (err) => this.onResponseError(controller, err)
+
+            resolve({
+              status,
+              statusText,
+              headersList,
+              body: decoders.length
+                ? pipeline(this.body, ...decoders, (err) => {
+                  if (err) {
+                    this.onResponseError(controller, err)
+                  }
+                }).on('error', onError)
+                : this.body.on('error', onError)
+            })
+          },
+
+          onResponseData (controller, chunk) {
+            if (fetchParams.controller.dump) {
+              return
+            }
+
+            // 1. If one or more bytes have been transmitted from response’s
+            // message body, then:
+
+            //  1. Let bytes be the transmitted bytes.
+            const bytes = chunk
+
+            //  2. Let codings be the result of extracting header list values
+            //  given `Content-Encoding` and response’s header list.
+            //  See pullAlgorithm.
+
+            //  3. Increase timingInfo’s encoded body size by bytes’s length.
+            timingInfo.encodedBodySize += bytes.byteLength
+
+            //  4. See pullAlgorithm...
+
+            if (this.body.push(bytes) === false) {
+              controller.pause()
+            }
+          },
+
+          onResponseEnd () {
+            if (this.abort) {
+              fetchParams.controller.off('terminated', this.abort)
+            }
+
+            fetchParams.controller.ended = true
+
+            this.body?.push(null)
+          },
+
+          onResponseError (_controller, error) {
+            if (this.abort) {
+              fetchParams.controller.off('terminated', this.abort)
+            }
+
+            if (
+              request.mode === 'websocket' &&
+              allowH2 !== false &&
+              error?.code === 'UND_ERR_INFO' &&
+              error?.message === 'HTTP/2: Extended CONNECT protocol not supported by server'
+            ) {
+              // The origin negotiated H2, but RFC 8441 websocket support is unavailable.
+              // Retry the opening handshake on a fresh HTTP/1.1-only connection instead.
+              resolve(dispatchWithProtocolPreference(body, false))
+              return
+            }
+
+            this.body?.destroy(error)
+
+            fetchParams.controller.terminate(error)
+
+            reject(error)
+          },
+
+          onRequestUpgrade (controller, status, headers, socket) {
+            // We need to support 200 for websocket over h2 as per RFC-8441
+            // Absence of session means H1
+            if ((socket.session != null && status !== 200) || (socket.session == null && status !== 101)) {
+              if (socket.session != null) {
+                // The server refused the extended CONNECT, and nothing further
+                // will settle this request. Fail the opening handshake here.
+                controller.abort(new SocketError('bad upgrade', null))
+              }
+              return false
+            }
+
+            const rawHeaders = controller?.rawHeaders ?? []
+            const headersList = new HeadersList()
+            appendHeadersListFromResponseHeaders(headersList, headers, rawHeaders)
+
+            resolve({
+              status,
+              statusText: STATUS_CODES[status],
+              headersList,
+              socket
+            })
+
+            return true
           }
-
-          const onError = this.onError.bind(this)
-
-          resolve({
-            status,
-            statusText,
-            headersList,
-            body: decoders.length
-              ? pipeline(this.body, ...decoders, (err) => {
-                if (err) {
-                  this.onError(err)
-                }
-              }).on('error', onError)
-              : this.body.on('error', onError)
-          })
-
-          return true
-        },
-
-        onData (chunk) {
-          if (fetchParams.controller.dump) {
-            return
-          }
-
-          // 1. If one or more bytes have been transmitted from response’s
-          // message body, then:
-
-          //  1. Let bytes be the transmitted bytes.
-          const bytes = chunk
-
-          //  2. Let codings be the result of extracting header list values
-          //  given `Content-Encoding` and response’s header list.
-          //  See pullAlgorithm.
-
-          //  3. Increase timingInfo’s encoded body size by bytes’s length.
-          timingInfo.encodedBodySize += bytes.byteLength
-
-          //  4. See pullAlgorithm...
-
-          return this.body.push(bytes)
-        },
-
-        onComplete () {
-          if (this.abort) {
-            fetchParams.controller.off('terminated', this.abort)
-          }
-
-          fetchParams.controller.ended = true
-
-          this.body.push(null)
-        },
-
-        onError (error) {
-          if (this.abort) {
-            fetchParams.controller.off('terminated', this.abort)
-          }
-
-          this.body?.destroy(error)
-
-          fetchParams.controller.terminate(error)
-
-          reject(error)
-        },
-
-        onUpgrade (status, rawHeaders, socket) {
-          if (status !== 101) {
-            return
-          }
-
-          const headersList = new HeadersList()
-
-          for (let i = 0; i < rawHeaders.length; i += 2) {
-            headersList.append(bufferToLowerCasedHeaderName(rawHeaders[i]), rawHeaders[i + 1].toString('latin1'), true)
-          }
-
-          resolve({
-            status,
-            statusText: STATUS_CODES[status],
-            headersList,
-            socket
-          })
-
-          return true
         }
-      }
-    ))
+      ))
+    }
   }
 }
 

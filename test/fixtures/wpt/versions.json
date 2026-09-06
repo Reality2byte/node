@@ -4,7 +4,7 @@
     "path": "common"
   },
   "compression": {
-    "commit": "67880a4eb83ca9aa732eec4b35a1971ff5bf37ff",
+    "commit": "ae05f5cb53d3e290b91ae1e92069baa188292880",
     "path": "compression"
   },
   "console": {
@@ -28,7 +28,7 @@
     "path": "fetch/data-urls/resources"
   },
   "FileAPI": {
-    "commit": "cceaf3628da950621004d9b5d8c1d1f367073347",
+    "commit": "7f5130188818b6c12c636491186b459ec2bf131f",
     "path": "FileAPI"
   },
   "hr-time": {
@@ -52,7 +52,7 @@
     "path": "html/webappapis/timers"
   },
   "interfaces": {
-    "commit": "e1b27be06b43787a001b7297c4e0fabdd276560f",
+    "commit": "3f15e5c09448b8e917c9128d3b07cc78f044c83a",
     "path": "interfaces"
   },
   "performance-timeline": {
@@ -64,19 +64,23 @@
     "path": "resource-timing"
   },
   "resources": {
-    "commit": "1d2c5fb36a6e477c8f915bde7eca027be6abe792",
+    "commit": "6a2f32237615d7ea9c1eb1e30453066b5555c603",
     "path": "resources"
   },
+  "service-workers": {
+    "commit": "b7ed7c8dcd260f0f80879577752c68f042a7d054",
+    "path": "service-workers"
+  },
   "streams": {
-    "commit": "bc9dcbbf1a4c2c741ef47f47d6ede6458f40c4a4",
+    "commit": "4832db47614f5f48cc57374cbf5c1f70937fad48",
     "path": "streams"
   },
   "url": {
-    "commit": "9504a83e014b6b26d6c09eaee89c6b83cb7410c2",
+    "commit": "c23755a1449cc9c5a9131378c13ecf073c0885c6",
     "path": "url"
   },
   "urlpattern": {
-    "commit": "cff1ac112375b8089fe9f6bf434f602cf7ef98be",
+    "commit": "4832db47614f5f48cc57374cbf5c1f70937fad48",
     "path": "urlpattern"
   },
   "user-timing": {
@@ -84,7 +88,7 @@
     "path": "user-timing"
   },
   "wasm/jsapi": {
-    "commit": "cde25e7e3c3b9d2280eb088a3fb9da988793d255",
+    "commit": "288c467d350ec4b8e4fbc7f2ccb6119293186611",
     "path": "wasm/jsapi"
   },
   "wasm/webapi": {
@@ -96,8 +100,12 @@
     "path": "web-locks"
   },
   "WebCryptoAPI": {
-    "commit": "ff26d9b307b981b3f1b88f454268e6bb8933e6c2",
+    "commit": "e235e089b4e44a598f2d61e93732e0c4d9f03e04",
     "path": "WebCryptoAPI"
+  },
+  "webidl": {
+    "commit": "65bbe07908e5c19e8a6c7ff8701cc2a722cd215e",
+    "path": "webidl"
   },
   "webidl/ecmascript-binding/es-exceptions": {
     "commit": "2f96fa19966d6bc19e979a09479ac8a7aa337c54",
@@ -110,5 +118,9 @@
   "webstorage": {
     "commit": "1d2c5fb36a6e477c8f915bde7eca027be6abe792",
     "path": "webstorage"
+  },
+  "workers": {
+    "commit": "4832db47614f5f48cc57374cbf5c1f70937fad48",
+    "path": "workers"
   }
 }

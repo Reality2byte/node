@@ -48,12 +48,10 @@ class TestOneByteResource : public v8::String::ExternalOneByteStringResource {
 TEST(ExternalString_ExternalBackingStoreSizeIncreases) {
   CcTest::InitializeVM();
   LocalContext env;
-  v8::Isolate* isolate = env->GetIsolate();
+  v8::Isolate* isolate = env.isolate();
   Heap* heap = reinterpret_cast<Isolate*>(isolate)->heap();
-  ExternalBackingStoreType type = ExternalBackingStoreType::kExternalString;
 
-  const size_t backing_store_before =
-      heap->old_space()->ExternalBackingStoreBytes(type);
+  const size_t backing_store_before = heap->GetExternalStrinBytesForTesting();
 
   {
     v8::HandleScope handle_scope(isolate);
@@ -61,8 +59,7 @@ TEST(ExternalString_ExternalBackingStoreSizeIncreases) {
         isolate, new TestOneByteResource(i::StrDup(TEST_STR))).ToLocalChecked();
     USE(es);
 
-    const size_t backing_store_after =
-        heap->old_space()->ExternalBackingStoreBytes(type);
+    const size_t backing_store_after = heap->GetExternalStrinBytesForTesting();
 
     CHECK_EQ(es->Length(), backing_store_after - backing_store_before);
   }
@@ -72,12 +69,10 @@ TEST(ExternalString_ExternalBackingStoreSizeDecreases) {
   ManualGCScope manual_gc_scope;
   CcTest::InitializeVM();
   LocalContext env;
-  v8::Isolate* isolate = env->GetIsolate();
+  v8::Isolate* isolate = env.isolate();
   Heap* heap = reinterpret_cast<Isolate*>(isolate)->heap();
-  ExternalBackingStoreType type = ExternalBackingStoreType::kExternalString;
 
-  const size_t backing_store_before =
-      heap->old_space()->ExternalBackingStoreBytes(type);
+  const size_t backing_store_before = heap->GetExternalStrinBytesForTesting();
 
   {
     v8::HandleScope handle_scope(isolate);
@@ -93,9 +88,8 @@ TEST(ExternalString_ExternalBackingStoreSizeDecreases) {
     heap::InvokeAtomicMajorGC(heap);
   }
 
-  const size_t backing_store_after =
-      heap->old_space()->ExternalBackingStoreBytes(type);
-  CHECK_EQ(0, backing_store_after - backing_store_before);
+  const size_t backing_store_after = heap->GetExternalStrinBytesForTesting();
+  CHECK_EQ(backing_store_after, backing_store_before);
 }
 
 TEST(ExternalString_ExternalBackingStoreSizeIncreasesMarkCompact) {
@@ -105,13 +99,11 @@ TEST(ExternalString_ExternalBackingStoreSizeIncreasesMarkCompact) {
       manual_evacuation_candidate_selection_scope(manual_gc_scope);
   CcTest::InitializeVM();
   LocalContext env;
-  v8::Isolate* isolate = env->GetIsolate();
+  v8::Isolate* isolate = env.isolate();
   Heap* heap = reinterpret_cast<Isolate*>(isolate)->heap();
   heap::AbandonCurrentlyFreeMemory(heap->old_space());
-  ExternalBackingStoreType type = ExternalBackingStoreType::kExternalString;
 
-  const size_t backing_store_before =
-      heap->old_space()->ExternalBackingStoreBytes(type);
+  const size_t backing_store_before = heap->GetExternalStrinBytesForTesting();
 
   {
     v8::HandleScope handle_scope(isolate);
@@ -120,13 +112,12 @@ TEST(ExternalString_ExternalBackingStoreSizeIncreasesMarkCompact) {
     v8::internal::DirectHandle<v8::internal::String> esh =
         v8::Utils::OpenDirectHandle(*es);
 
-    PageMetadata* page_before_gc = PageMetadata::FromHeapObject(*esh);
+    NormalPage* page_before_gc = NormalPage::FromHeapObject(*esh);
     heap::ForceEvacuationCandidate(page_before_gc);
 
     heap::InvokeMajorGC(heap);
 
-    const size_t backing_store_after =
-        heap->old_space()->ExternalBackingStoreBytes(type);
+    const size_t backing_store_after = heap->GetExternalStrinBytesForTesting();
     CHECK_EQ(es->Length(), backing_store_after - backing_store_before);
   }
 
@@ -137,8 +128,7 @@ TEST(ExternalString_ExternalBackingStoreSizeIncreasesMarkCompact) {
     heap::InvokeAtomicMajorGC(heap);
   }
 
-  const size_t backing_store_after =
-      heap->old_space()->ExternalBackingStoreBytes(type);
+  const size_t backing_store_after = heap->GetExternalStrinBytesForTesting();
   CHECK_EQ(0, backing_store_after - backing_store_before);
 }
 
@@ -147,25 +137,19 @@ TEST(ExternalString_ExternalBackingStoreSizeIncreasesAfterExternalization) {
   ManualGCScope manual_gc_scope;
   CcTest::InitializeVM();
   LocalContext env;
-  v8::Isolate* isolate = env->GetIsolate();
+  v8::Isolate* isolate = env.isolate();
   Heap* heap = reinterpret_cast<Isolate*>(isolate)->heap();
-  ExternalBackingStoreType type = ExternalBackingStoreType::kExternalString;
-  size_t old_backing_store_before = 0, new_backing_store_before = 0;
+  const size_t backing_store_before = heap->GetExternalStrinBytesForTesting();
 
   {
     v8::HandleScope handle_scope(isolate);
 
-    new_backing_store_before =
-        heap->new_space()->ExternalBackingStoreBytes(type);
-    old_backing_store_before =
-        heap->old_space()->ExternalBackingStoreBytes(type);
 
     // Allocate normal string in the new gen.
     v8::Local<v8::String> str =
         v8::String::NewFromUtf8Literal(isolate, TEST_STR);
 
-    CHECK_EQ(0, heap->new_space()->ExternalBackingStoreBytes(type) -
-                    new_backing_store_before);
+    CHECK_EQ(heap->GetExternalStrinBytesForTesting(), backing_store_before);
 
     // Trigger full GC so that the newly allocated string moves to old gen.
     heap::InvokeAtomicMajorGC(heap);
@@ -174,8 +158,8 @@ TEST(ExternalString_ExternalBackingStoreSizeIncreasesAfterExternalization) {
         isolate, new TestOneByteResource(i::StrDup(TEST_STR)));
     CHECK(success);
 
-    CHECK_EQ(str->Length(), heap->old_space()->ExternalBackingStoreBytes(type) -
-                                old_backing_store_before);
+    CHECK_EQ(str->Length(),
+             heap->GetExternalStrinBytesForTesting() - backing_store_before);
   }
 
   {
@@ -185,9 +169,8 @@ TEST(ExternalString_ExternalBackingStoreSizeIncreasesAfterExternalization) {
     heap::InvokeAtomicMajorGC(heap);
   }
 
-  const size_t backing_store_after =
-      heap->old_space()->ExternalBackingStoreBytes(type);
-  CHECK_EQ(0, backing_store_after - old_backing_store_before);
+  const size_t backing_store_after = heap->GetExternalStrinBytesForTesting();
+  CHECK_EQ(backing_store_after, backing_store_before);
 }
 
 TEST(ExternalString_PromotedThinString) {
@@ -195,7 +178,7 @@ TEST(ExternalString_PromotedThinString) {
   ManualGCScope manual_gc_scope;
   CcTest::InitializeVM();
   LocalContext env;
-  v8::Isolate* isolate = env->GetIsolate();
+  v8::Isolate* isolate = env.isolate();
   i::Isolate* i_isolate = CcTest::i_isolate();
   i::Factory* factory = i_isolate->factory();
   Heap* heap = i_isolate->heap();

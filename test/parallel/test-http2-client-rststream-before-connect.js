@@ -8,7 +8,7 @@ const h2 = require('http2');
 let client;
 
 const server = h2.createServer();
-server.on('stream', (stream) => {
+server.on('stream', common.mustCall((stream) => {
   stream.on('close', common.mustCall(() => {
     client.close();
     server.close();
@@ -18,7 +18,7 @@ server.on('stream', (stream) => {
     name: 'Error',
     message: 'Stream closed with error code NGHTTP2_PROTOCOL_ERROR'
   }));
-});
+}));
 
 server.listen(0, common.mustCall(() => {
   client = h2.connect(`http://localhost:${server.address().port}`);
@@ -71,9 +71,9 @@ server.listen(0, common.mustCall(() => {
   // RST_STREAM frame before it ever has a chance to reply.
   req.on('response', common.mustNotCall());
 
-  // The `end` event should still fire as we close the readable stream by
-  // pushing a `null` chunk.
-  req.on('end', common.mustCall());
+  // Any non-clean local close triggers an 'error', and the readable's
+  // errored state blocks 'end' - matching HTTP/1 ECONNRESET behaviour.
+  req.on('end', common.mustNotCall());
 
   req.resume();
   req.end();

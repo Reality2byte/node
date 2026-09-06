@@ -5,11 +5,19 @@ const common = require('../common');
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
-if (process.features.openssl_is_boringssl)
-  common.skip('Skipping unsupported ChaCha20-Poly1305 test case');
-
 const assert = require('assert');
+const { hasFIPS } = require('../common/crypto');
 const { subtle } = globalThis.crypto;
+
+if (hasFIPS(3)) {
+  assert.rejects(
+    subtle.generateKey(
+      { name: 'ChaCha20-Poly1305' },
+      false,
+      ['encrypt', 'decrypt']),
+    { name: 'NotSupportedError' }).then(common.mustCall());
+  return;
+}
 
 async function testEncrypt({ keyBuffer, algorithm, plaintext, result }) {
   // Using a copy of plaintext to prevent tampering of the original
@@ -48,7 +56,7 @@ async function testEncryptNoEncrypt({ keyBuffer, algorithm, plaintext }) {
     ['decrypt']);
 
   return assert.rejects(subtle.encrypt(algorithm, key, plaintext), {
-    message: /The requested operation is not valid for the provided key/
+    message: /Unable to use this key to encrypt/
   });
 }
 
@@ -63,7 +71,7 @@ async function testEncryptNoDecrypt({ keyBuffer, algorithm, plaintext }) {
   const output = await subtle.encrypt(algorithm, key, plaintext);
 
   return assert.rejects(subtle.decrypt(algorithm, key, output), {
-    message: /The requested operation is not valid for the provided key/
+    message: /Unable to use this key to decrypt/
   });
 }
 
@@ -77,7 +85,22 @@ async function testEncryptWrongAlg({ keyBuffer, algorithm, plaintext }, alg) {
     ['encrypt']);
 
   return assert.rejects(subtle.encrypt(algorithm, key, plaintext), {
-    message: /The requested operation is not valid for the provided key/
+    message: /Key algorithm mismatch/
+  });
+}
+
+async function testDecryptWrongAlg({ keyBuffer, algorithm, result }, alg) {
+  if (result === undefined) return;
+  assert.notStrictEqual(algorithm.name, alg);
+  const key = await subtle.importKey(
+    'raw-secret',
+    keyBuffer,
+    { name: alg },
+    false,
+    ['decrypt']);
+
+  return assert.rejects(subtle.decrypt(algorithm, key, result), {
+    message: /Key algorithm mismatch/
   });
 }
 
@@ -107,6 +130,7 @@ async function testDecrypt({ keyBuffer, algorithm, result }) {
       variations.push(testEncryptNoEncrypt(vector));
       variations.push(testEncryptNoDecrypt(vector));
       variations.push(testEncryptWrongAlg(vector, 'AES-GCM'));
+      variations.push(testDecryptWrongAlg(vector, 'AES-GCM'));
     });
 
     failing.forEach((vector) => {
@@ -189,7 +213,7 @@ async function testDecrypt({ keyBuffer, algorithm, result }) {
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
     await assert.rejects(
       subtle.decrypt({ name: 'ChaCha20-Poly1305', iv }, secretKey, new Uint8Array(8)),
-      { name: 'OperationError', message: /The provided data is too small/ }
+      { name: 'OperationError' }
     );
 
     // Test invalid tagLength values
@@ -204,6 +228,7 @@ async function testDecrypt({ keyBuffer, algorithm, result }) {
 
     // JWK error conditions
     const jwkTests = [
+      [{ kty: 'oct' }, /Invalid keyData/],
       [{ k: baseJwk.k }, /Invalid keyData/],
       [{ ...baseJwk, kty: 'RSA' }, /Invalid JWK "kty" Parameter/],
       [{ ...baseJwk, use: 'sig' }, /Invalid JWK "use" Parameter/],

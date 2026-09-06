@@ -41,6 +41,7 @@
 #include "src/heap/factory.h"
 #include "src/heap/heap-inl.h"
 #include "src/objects/objects-inl.h"
+#include "src/sandbox/sandboxable-thread.h"
 #include "test/cctest/cctest.h"
 #include "test/cctest/heap/heap-utils.h"
 
@@ -1854,35 +1855,64 @@ TEST(HashArrayIndexStrings) {
   v8::HandleScope scope(CcTest::isolate());
   i::Isolate* isolate = CcTest::i_isolate();
 
-  CHECK_EQ(Name::HashBits::decode(
-               StringHasher::MakeArrayIndexHash(0 /* value */, 1 /* length */)),
+  i::HashSeed seed(isolate);
+  CHECK_EQ(Name::HashBits::decode(StringHasher::MakeArrayIndexHash(
+               0 /* value */, 1 /* length */, seed)),
            isolate->factory()->zero_string()->hash());
 
-  CHECK_EQ(Name::HashBits::decode(
-               StringHasher::MakeArrayIndexHash(1 /* value */, 1 /* length */)),
+  CHECK_EQ(Name::HashBits::decode(StringHasher::MakeArrayIndexHash(
+               1 /* value */, 1 /* length */, seed)),
            isolate->factory()->one_string()->hash());
 
+  CHECK_EQ(0u, StringHasher::DecodeArrayIndexFromHashField(
+                   isolate->factory()->zero_string()->raw_hash_field(), seed));
+  CHECK_EQ(1u, StringHasher::DecodeArrayIndexFromHashField(
+                   isolate->factory()->one_string()->raw_hash_field(), seed));
+
   IndexData tests[] = {
-    {"", false, 0, false, 0},
-    {"123no", false, 0, false, 0},
-    {"12345", true, 12345, true, 12345},
-    {"12345678", true, 12345678, true, 12345678},
-    {"4294967294", true, 4294967294u, true, 4294967294u},
+      {"", false, 0, false, 0},
+      {"123no", false, 0, false, 0},
+      {"12345", true, 12345, true, 12345},
+      {"12345678", true, 12345678, true, 12345678},
+      {"1000000", true, 1000000, true, 1000000},
+      {"9999999", true, 9999999, true, 9999999},
+      {"10000000", true, 10000000, true, 10000000},
+      {"16777215", true, 16777215, true, 16777215},  // max cached index
+      {"99999999", true, 99999999, true, 99999999},
+      {"4294967294", true, 4294967294u, true, 4294967294u},
 #if V8_TARGET_ARCH_32_BIT
-    {"4294967295", false, 0, false, 0},  // Valid length but not index.
-    {"4294967296", false, 0, false, 0},
-    {"9007199254740991", false, 0, false, 0},
+      {"4294967295", false, 0, false, 0},  // Valid length but not index.
+      {"4294967296", false, 0, false, 0},
+      {"9007199254740991", false, 0, false, 0},
 #else
-    {"4294967295", false, 0, true, 4294967295u},
-    {"4294967296", false, 0, true, 4294967296ull},
-    {"9007199254740991", false, 0, true, 9007199254740991ull},
+      {"4294967295", false, 0, true, 4294967295u},
+      {"4294967296", false, 0, true, 4294967296ull},
+      {"9007199254740991", false, 0, true, 9007199254740991ull},
 #endif
-    {"9007199254740992", false, 0, false, 0},
-    {"18446744073709551615", false, 0, false, 0},
-    {"18446744073709551616", false, 0, false, 0}
-  };
+      {"9007199254740992", false, 0, false, 0},
+      {"18446744073709551615", false, 0, false, 0},
+      {"18446744073709551616", false, 0, false, 0}};
   for (int i = 0, n = arraysize(tests); i < n; i++) {
     TestString(isolate, tests[i]);
+  }
+}
+
+TEST(ArrayIndexHashRoundTrip) {
+  CcTest::InitializeVM();
+  LocalContext context;
+  v8::HandleScope scope(CcTest::isolate());
+  i::Isolate* isolate = CcTest::i_isolate();
+  i::HashSeed seed(isolate);
+
+  constexpr uint32_t max_value = (1u << Name::kArrayIndexValueBits) - 1;
+  for (uint32_t value = 0; value <= max_value; value++) {
+    uint32_t length =
+        value == 0 ? 1 : static_cast<uint32_t>(std::log10(value)) + 1;
+    uint32_t raw_hash_field =
+        StringHasher::MakeArrayIndexHash(value, length, seed);
+    uint32_t decoded =
+        StringHasher::DecodeArrayIndexFromHashField(raw_hash_field, seed);
+    CHECK_EQ(value, decoded);
   }
 }
 
@@ -2145,10 +2175,15 @@ TEST(CheckCachedDataInternalExternalUncachedStringTwoByte) {
 
 TEST(CheckIntlSegmentIteratorTerminateExecutionInterrupt) {
 #if V8_INTL_SUPPORT
-  class WorkerThread : public v8::base::Thread {
+  // This tag value has been picked arbitrarily between 0 and
+  // V8_EXTERNAL_POINTER_TAG_COUNT.
+  constexpr v8::ExternalPointerTypeTag kWorkerThreadTag = 23;
+  class WorkerThread : public v8::internal::SandboxableThread {
    public:
     WorkerThread(v8::base::Mutex& m, v8::base::ConditionVariable& cv)
-        : Thread(v8::base::Thread::Options("WorkerThread")), m_(m), cv_(cv) {}
+        : SandboxableThread(v8::base::Thread::Options("WorkerThread")),
+          m_(m),
+          cv_(cv) {}
     void Run() override {
       v8::Isolate::CreateParams create_params;
       create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
@@ -2157,12 +2192,14 @@ TEST(CheckIntlSegmentIteratorTerminateExecutionInterrupt) {
         v8::Isolate::Scope isolate_scope(isolate);
         v8::HandleScope handle_scope(isolate);
         v8::Local<v8::ObjectTemplate> global = ObjectTemplate::New(isolate);
-        v8::Local<v8::Value> wrapper = v8::External::New(isolate, this);
-        global->Set(isolate, "notifyCV",
-                    v8::FunctionTemplate::New(
-                        isolate, (v8::FunctionCallback)&NotifyCallback, wrapper,
-                        Local<v8::Signature>(), 0, ConstructorBehavior::kThrow,
-                        SideEffectType::kHasNoSideEffect));
+        v8::Local<v8::Value> wrapper =
+            v8::External::New(isolate, this, kWorkerThreadTag);
+        global->Set(
+            isolate, "notifyCV",
+            v8::FunctionTemplate::New(
+                isolate, static_cast<v8::FunctionCallback>(&NotifyCallback),
+                wrapper, Local<v8::Signature>(), 0, ConstructorBehavior::kThrow,
+                SideEffectType::kHasNoSideEffect));
         LocalContext context(isolate, nullptr, global);
         v8::TryCatch try_catch(isolate);
         auto result = CompileRun(
@@ -2191,12 +2228,16 @@ TEST(CheckIntlSegmentIteratorTerminateExecutionInterrupt) {
    private:
     static WorkerThread* Unwrap(Local<Value> value) {
       CHECK(value->IsExternal());
-      return reinterpret_cast<WorkerThread*>(value.As<External>()->Value());
+      return reinterpret_cast<WorkerThread*>(
+          value.As<External>()->Value(kWorkerThreadTag));
     }
     static void NotifyCallback(
         const v8::FunctionCallbackInfo<v8::Value>& args) {
       auto self = Unwrap(args.Data());
-      self->did_enter_loop_ = true;
+      {
+        v8::base::MutexGuard guard(self->m_);
+        self->did_enter_loop_ = true;
+      }
       self->NotifyCV();
     }
     bool did_enter_loop_{false};

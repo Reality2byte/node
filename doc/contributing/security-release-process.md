@@ -19,29 +19,33 @@ steps listed in the process as outlined in
 The current security stewards are documented in the main Node.js
 [README.md](https://github.com/nodejs/node#security-release-stewards).
 
-| Company      | Person          | Release Date |
-| ------------ | --------------- | ------------ |
-| NearForm     | Matteo          | 2021-Oct-12  |
-| Datadog      | Bryan           | 2022-Jan-10  |
-| RH and IBM   | Joe             | 2022-Mar-18  |
-| NearForm     | Matteo / Rafael | 2022-Jul-07  |
-| Datadog      | Vladimir        | 2022-Sep-23  |
-| NodeSource   | Juan            | 2022-Nov-04  |
-| RH and IBM   | Michael         | 2023-Feb-16  |
-| NearForm     | Rafael          | 2023-Jun-20  |
-| NearForm     | Rafael          | 2023-Aug-09  |
-| NearForm     | Rafael          | 2023-Oct-13  |
-| NodeSource   | Rafael          | 2024-Feb-14  |
-| NodeSource   | Rafael          | 2024-Apr-03  |
-| NodeSource   | Rafael          | 2024-Apr-10  |
-| NodeSource   | Rafael          | 2024-Jul-08  |
-| NodeSource   | Rafael          | 2025-Jan-21  |
-| NodeSource   | Rafael          | 2025-May-14  |
-| NodeSource   | Rafael          | 2025-July-15 |
-| Datadog      | Bryan           |              |
-| IBM          | Joe             |              |
-| Platformatic | Matteo          |              |
-| NodeSource   | Juan            |              |
+| Company                 | Person          | Release Date |
+| ----------------------- | --------------- | ------------ |
+| NearForm                | Matteo          | 2021-Oct-12  |
+| Datadog                 | Bryan           | 2022-Jan-10  |
+| RH and IBM              | Joe             | 2022-Mar-18  |
+| NearForm                | Matteo / Rafael | 2022-Jul-07  |
+| Datadog                 | Vladimir        | 2022-Sep-23  |
+| NodeSource              | Juan            | 2022-Nov-04  |
+| RH and IBM              | Michael         | 2023-Feb-16  |
+| NearForm                | Rafael          | 2023-Jun-20  |
+| NearForm                | Rafael          | 2023-Aug-09  |
+| NearForm                | Rafael          | 2023-Oct-13  |
+| NodeSource              | Rafael          | 2024-Feb-14  |
+| NodeSource              | Rafael          | 2024-Apr-03  |
+| NodeSource              | Rafael          | 2024-Apr-10  |
+| NodeSource              | Rafael          | 2024-Jul-08  |
+| NodeSource              | Rafael          | 2025-Jan-21  |
+| NodeSource              | Rafael          | 2025-May-14  |
+| NodeSource              | Rafael          | 2025-Jul-15  |
+| HeroDevs and NodeSource | Marco / Rafael  | 2026-Jan-13  |
+| NodeSource              | Rafael          | 2026-Mar-24  |
+| Platformatic            | Antoine         | 2026-Jun-18  |
+| NodeSource              | Rafael          | 2026-Jul-29  |
+| Datadog                 | Bryan           |              |
+| IBM                     | Joe             |              |
+| Platformatic            | Matteo          |              |
+| NodeSource              | Juan            |              |
 
 ## Planning
 
@@ -64,6 +68,8 @@ The current security stewards are documented in the main Node.js
 * [ ] 3\. **Assigning Severity and Writing Team Summary:**
   * [ ] Assign a severity and write a team summary on HackerOne for the reports
     chosen in the `vulnerabilities.json`.
+  * [ ] If a report targets a Node.js dependency, such as `undici` or `llhttp`,
+    make sure to update the `DEPENDENCY` custom field on HackerOne.
   * Run `git node security --sync` to update severity and summary in
     `vulnerabilities.json`.
 
@@ -83,6 +89,8 @@ The current security stewards are documented in the main Node.js
   * Get volunteers for the upcoming security release on the affected release
     lines.
   * Make sure to sync nodejs-private (vN.x) branches with nodejs/node.
+  * **Important:** Ensure that all backport commits include the `PR-URL` metadata
+    in their commit messages. This is required for the security release automation.
 
 * [ ] 7\. **Preparing Pre and Post Release Blog Posts:**
   * [ ] Create a pre-release blog post using `git node security --pre-release`.

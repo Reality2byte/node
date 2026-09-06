@@ -9,7 +9,6 @@ const dgram = require('dgram');
   -1,
   1.1,
   NaN,
-  undefined,
   {},
   [],
   null,
@@ -18,11 +17,9 @@ const dgram = require('dgram');
   true,
   Infinity,
 ].forEach((maxTimeout) => {
-  try {
+  assert.throws(() => {
     new dns.Resolver({ maxTimeout });
-  } catch (e) {
-    assert.ok(/ERR_OUT_OF_RANGE|ERR_INVALID_ARG_TYPE/i.test(e.code));
-  }
+  }, /ERR_OUT_OF_RANGE|ERR_INVALID_ARG_TYPE/i);
 });
 
 const server = dgram.createSocket('udp4');
@@ -55,9 +52,11 @@ server.bind(0, common.mustCall(async () => {
 
   // Test that maxTimeout is effective.
   // Without maxTimeout, the timeout will keep increasing when retrying.
-  const timeout1 = await timeout(address, { timeout: 500, tries: 3 });
-  // With maxTimeout, the timeout will always be 500 when retrying.
-  const timeout2 = await timeout(address, { timeout: 500, tries: 3, maxTimeout: 500 });
+  // Expired tries are only noticed on the resolver's `timeout` ms timer tick,
+  // so use enough tries that the doubling run cannot overlap the capped one.
+  const timeout1 = await timeout(address, { timeout: 100, tries: 5 });
+  // With maxTimeout, the timeout will always be 100 when retrying.
+  const timeout2 = await timeout(address, { timeout: 100, tries: 5, maxTimeout: 100 });
   console.log(`timeout1: ${timeout1}, timeout2: ${timeout2}`);
   assert.strictEqual(timeout1 !== undefined && timeout2 !== undefined, true);
   assert.strictEqual(timeout1 > timeout2, true);

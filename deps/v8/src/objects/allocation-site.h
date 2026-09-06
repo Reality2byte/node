@@ -22,7 +22,6 @@ enum InstanceType : uint16_t;
 
 V8_OBJECT class AllocationSite : public HeapObjectLayout {
  public:
-  NEVER_READ_ONLY_SPACE
   static const uint32_t kMaximumArrayBytesToPretransition = 8 * 1024;
 
   // Values for pretenure decision field.
@@ -31,8 +30,7 @@ V8_OBJECT class AllocationSite : public HeapObjectLayout {
     kDontTenure = 1,
     kMaybeTenure = 2,
     kTenure = 3,
-    kZombie = 4,  // See comment to IsZombie() for documentation.
-    kLastPretenureDecisionValue = kZombie
+    kLastPretenureDecisionValue = kTenure
   };
 
   const char* PretenureDecisionName(PretenureDecision decision);
@@ -75,7 +73,7 @@ V8_OBJECT class AllocationSite : public HeapObjectLayout {
 
   // transition_info bitfields, for constructed array transition info.
   using ElementsKindBits = base::BitField<ElementsKind, 0, 6>;
-  using DoNotInlineBit = base::BitField<bool, 6, 1>;
+  using SpeculationDisabledBit = base::BitField<bool, 6, 1>;
   // Unused bits 7-30.
 
   // Bitfields for pretenure_data
@@ -105,21 +103,7 @@ V8_OBJECT class AllocationSite : public HeapObjectLayout {
   inline int memento_create_count() const;
   inline void set_memento_create_count(int count);
 
-  // A "zombie" AllocationSite is one which has no more strong roots to
-  // it, and yet must be maintained until the next GC. The reason is that
-  // it may be that in new space there are AllocationMementos hanging around
-  // which point to the AllocationSite. If we scavenge these AllocationSites
-  // too soon, those AllocationMementos will end up pointing to garbage
-  // addresses. The concrete case happens when evacuating new space in the full
-  // GC which happens after sweeping has been started already. To mitigate this
-  // problem the garbage collector marks such AllocationSites as zombies when it
-  // discovers there are no roots, allowing the subsequent collection pass to
-  // recognize zombies and discard them later.
-  inline bool IsZombie() const;
-
   inline bool IsMaybeTenure() const;
-
-  inline void MarkZombie();
 
   inline bool MakePretenureDecision(PretenureDecision current_decision,
                                     double ratio, bool maximum_size_scavenge);
@@ -129,8 +113,10 @@ V8_OBJECT class AllocationSite : public HeapObjectLayout {
   inline ElementsKind GetElementsKind() const;
   inline void SetElementsKind(ElementsKind kind);
 
-  inline bool CanInlineCall() const;
-  inline void SetDoNotInlineCall();
+  // The IsSpeculationDisabled flag is only used for the Array constructor, and
+  // protects against deopt loops due to speculative optimizations.
+  inline bool IsSpeculationDisabled() const;
+  inline void SetSpeculationDisabled();
 
   inline bool PointsToLiteral() const;
 
@@ -193,7 +179,6 @@ V8_OBJECT class AllocationMemento : public StructLayout {
   inline void set_allocation_site(Tagged<AllocationSite> value,
                                   WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  inline bool IsValid() const;
   inline Tagged<AllocationSite> GetAllocationSite() const;
   inline Address GetAllocationSiteUnchecked() const;
 

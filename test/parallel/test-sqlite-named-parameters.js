@@ -1,21 +1,12 @@
 'use strict';
 const { skipIfSQLiteMissing } = require('../common');
 skipIfSQLiteMissing();
-const tmpdir = require('../common/tmpdir');
-const { join } = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { suite, test } = require('node:test');
-let cnt = 0;
-
-tmpdir.refresh();
-
-function nextDb() {
-  return join(tmpdir.path, `database-${cnt++}.db`);
-}
 
 suite('named parameters', () => {
   test('throws on unknown named parameters', (t) => {
-    const db = new DatabaseSync(nextDb());
+    const db = new DatabaseSync(':memory:');
     t.after(() => { db.close(); });
     const setup = db.exec(
       'CREATE TABLE types(key INTEGER PRIMARY KEY, val INTEGER) STRICT;'
@@ -32,7 +23,7 @@ suite('named parameters', () => {
   });
 
   test('bare named parameters are supported', (t) => {
-    const db = new DatabaseSync(nextDb());
+    const db = new DatabaseSync(':memory:');
     t.after(() => { db.close(); });
     const setup = db.exec(
       'CREATE TABLE data(key INTEGER PRIMARY KEY, val INTEGER) STRICT;'
@@ -47,7 +38,7 @@ suite('named parameters', () => {
   });
 
   test('duplicate bare named parameters are supported', (t) => {
-    const db = new DatabaseSync(nextDb());
+    const db = new DatabaseSync(':memory:');
     t.after(() => { db.close(); });
     const setup = db.exec(
       'CREATE TABLE data(key INTEGER PRIMARY KEY, val INTEGER) STRICT;'
@@ -62,7 +53,7 @@ suite('named parameters', () => {
   });
 
   test('bare named parameters throw on ambiguous names', (t) => {
-    const db = new DatabaseSync(nextDb());
+    const db = new DatabaseSync(':memory:');
     t.after(() => { db.close(); });
     const setup = db.exec(
       'CREATE TABLE types(key INTEGER PRIMARY KEY, val INTEGER) STRICT;'
@@ -116,6 +107,122 @@ suite('StatementSync.prototype.setAllowUnknownNamedParameters()', () => {
     }, {
       code: 'ERR_INVALID_ARG_TYPE',
       message: /The "enabled" argument must be a boolean/,
+    });
+  });
+
+  test('throws if the statement is already finalized', (t) => {
+    using db = new DatabaseSync(':memory:');
+    const setup = db.exec(
+      'CREATE TABLE data(key INTEGER PRIMARY KEY, val INTEGER) STRICT;'
+    );
+    t.assert.strictEqual(setup, undefined);
+    const stmt = db.prepare('INSERT INTO data (key, val) VALUES ($k, $v)');
+    stmt.close();
+    t.assert.throws(() => {
+      stmt.setAllowUnknownNamedParameters(true);
+    }, {
+      code: 'ERR_INVALID_STATE',
+      message: /statement has been finalized/,
+    });
+  });
+});
+
+suite('options.allowUnknownNamedParameters', () => {
+  test('unknown named parameters are allowed when input is true', (t) => {
+    const db = new DatabaseSync(':memory:');
+    t.after(() => { db.close(); });
+    const setup = db.exec(
+      'CREATE TABLE data(key INTEGER, val INTEGER) STRICT;'
+    );
+    t.assert.strictEqual(setup, undefined);
+    const stmt = db.prepare(
+      'INSERT INTO data (key, val) VALUES ($k, $v)',
+      { allowUnknownNamedParameters: true }
+    );
+    const params = { $a: 1, $b: 2, $k: 42, $y: 25, $v: 84, $z: 99 };
+    t.assert.deepStrictEqual(
+      stmt.run(params),
+      { changes: 1, lastInsertRowid: 1 },
+    );
+  });
+
+  test('unknown named parameters throw when input is false', (t) => {
+    const db = new DatabaseSync(':memory:');
+    t.after(() => { db.close(); });
+    const setup = db.exec(
+      'CREATE TABLE data(key INTEGER, val INTEGER) STRICT;'
+    );
+    t.assert.strictEqual(setup, undefined);
+    const stmt = db.prepare(
+      'INSERT INTO data (key, val) VALUES ($k, $v)',
+      { allowUnknownNamedParameters: false }
+    );
+    const params = { $a: 1, $b: 2, $k: 42, $y: 25, $v: 84, $z: 99 };
+    t.assert.throws(() => {
+      stmt.run(params);
+    }, {
+      code: 'ERR_INVALID_STATE',
+      message: /Unknown named parameter '\$a'/,
+    });
+  });
+
+  test('unknown named parameters throws error by default', (t) => {
+    const db = new DatabaseSync(':memory:');
+    t.after(() => { db.close(); });
+    const setup = db.exec(
+      'CREATE TABLE data(key INTEGER, val INTEGER) STRICT;'
+    );
+    t.assert.strictEqual(setup, undefined);
+    const stmt = db.prepare('INSERT INTO data (key, val) VALUES ($k, $v)');
+    const params = { $a: 1, $b: 2, $k: 42, $y: 25, $v: 84, $z: 99 };
+    t.assert.throws(() => {
+      stmt.run(params);
+    }, {
+      code: 'ERR_INVALID_STATE',
+      message: /Unknown named parameter '\$a'/,
+    });
+  });
+
+  test('throws when option is not a boolean', (t) => {
+    const db = new DatabaseSync(':memory:');
+    t.after(() => { db.close(); });
+    const setup = db.exec(
+      'CREATE TABLE data(key INTEGER PRIMARY KEY, val INTEGER) STRICT;'
+    );
+    t.assert.strictEqual(setup, undefined);
+    t.assert.throws(() => {
+      db.prepare(
+        'INSERT INTO data (key, val) VALUES ($k, $v)',
+        { allowUnknownNamedParameters: 'true' }
+      );
+    }, {
+      code: 'ERR_INVALID_ARG_TYPE',
+      message: /The "options\.allowUnknownNamedParameters" argument must be a boolean/,
+    });
+  });
+
+  test('setAllowUnknownNamedParameters can override prepare option', (t) => {
+    const db = new DatabaseSync(':memory:');
+    t.after(() => { db.close(); });
+    const setup = db.exec(
+      'CREATE TABLE data(key INTEGER, val INTEGER) STRICT;'
+    );
+    t.assert.strictEqual(setup, undefined);
+    const stmt = db.prepare(
+      'INSERT INTO data (key, val) VALUES ($k, $v)',
+      { allowUnknownNamedParameters: true }
+    );
+    const params = { $a: 1, $b: 2, $k: 42, $y: 25, $v: 84, $z: 99 };
+    t.assert.deepStrictEqual(
+      stmt.run(params),
+      { changes: 1, lastInsertRowid: 1 },
+    );
+    t.assert.strictEqual(stmt.setAllowUnknownNamedParameters(false), undefined);
+    t.assert.throws(() => {
+      stmt.run(params);
+    }, {
+      code: 'ERR_INVALID_STATE',
+      message: /Unknown named parameter '\$a'/,
     });
   });
 });

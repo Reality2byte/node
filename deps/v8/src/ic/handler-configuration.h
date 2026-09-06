@@ -48,6 +48,7 @@ V8_OBJECT class LoadHandler final : public DataHandler {
 
   enum class Kind {
     kElement,
+    kElementWithTransition,
     kIndexedString,
     kNormal,
     kGlobal,
@@ -60,7 +61,8 @@ V8_OBJECT class LoadHandler final : public DataHandler {
     kSlow,
     kProxy,
     kNonExistent,
-    kModuleExport
+    kModuleExport,
+    kGeneric,  // Used for keyed loads with "1 map, many property names".
   };
   using KindBits = base::BitField<Kind, 0, 4>;
 
@@ -75,6 +77,14 @@ V8_OBJECT class LoadHandler final : public DataHandler {
   // start object.
   using LookupOnLookupStartObjectBits =
       DoAccessCheckOnLookupStartObjectBits::Next<bool, 1>;
+
+  //
+  // Encoding when KindBits contains kInterceptor.
+  //
+
+  // Encodes whether the inteceptor is masking or non-masking.
+  using NonMaskingInterceptorBits =
+      LookupOnLookupStartObjectBits::Next<bool, 1>;
 
   //
   // Encoding when KindBits contains kNativeDataProperty.
@@ -154,11 +164,19 @@ V8_OBJECT class LoadHandler final : public DataHandler {
   static inline Handle<Smi> LoadGlobal(Isolate* isolate);
 
   // Creates a Smi-handler for loading a property from an object with an
+  // interceptor. Works only as a part of full handler (LoadFromPrototype(..)
+  // or LoadInterceptorHolderIsLookupStartupObject(..)).
+  static inline Tagged<Smi> LoadInterceptor(bool non_masking);
+  // Creates handler for loading a property from a lookup start object with an
   // interceptor.
-  static inline Handle<Smi> LoadInterceptor(Isolate* isolate);
+  static Handle<LoadHandler> LoadInterceptorHolderIsLookupStartupObject(
+      Isolate* isolate, DirectHandle<Map> lookup_start_object_map,
+      DirectHandle<InterceptorInfo> interceptor_info);
 
   // Creates a Smi-handler for loading a property from an object.
-  static inline Handle<Smi> LoadSlow(Isolate* isolate);
+  static inline Handle<Smi> LoadSlow(Isolate* isolate);     // Runtime call.
+  static inline Handle<Smi> LoadGeneric(Isolate* isolate);  // Generic stub.
+  static inline Tagged<Smi> LoadGeneric();
 
   // Creates a Smi-handler for loading a field from fast object.
   static inline Handle<Smi> LoadField(Isolate* isolate, FieldIndex field_index);
@@ -191,17 +209,9 @@ V8_OBJECT class LoadHandler final : public DataHandler {
   static inline DirectHandle<Smi> LoadWasmArrayElement(Isolate* isolate,
                                                        WasmValueType type);
 
-  // Creates a data handler that represents a load of a non-existent property.
-  // {holder} is the object from which the property is loaded. If no holder is
-  // needed (e.g., for "nonexistent"), null_value() may be passed in.
-  static Handle<Object> LoadFullChain(Isolate* isolate,
-                                      DirectHandle<Map> receiver_map,
-                                      const MaybeObjectDirectHandle& holder,
-                                      Handle<Smi> smi_handler);
-
   // Creates a data handler that represents a prototype chain check followed
   // by given Smi-handler that encoded a load from the holder.
-  static Handle<Object> LoadFromPrototype(
+  static Handle<LoadHandler> LoadFromPrototype(
       Isolate* isolate, DirectHandle<Map> receiver_map,
       DirectHandle<JSReceiver> holder, Tagged<Smi> smi_handler,
       MaybeObjectDirectHandle maybe_data1 = MaybeObjectDirectHandle(),
@@ -210,12 +220,18 @@ V8_OBJECT class LoadHandler final : public DataHandler {
   // Creates a Smi-handler for loading a non-existent property. Works only as
   // a part of prototype chain check.
   static inline Handle<Smi> LoadNonExistent(Isolate* isolate);
+  static Handle<Object> LoadNonExistent(
+      Isolate* isolate, DirectHandle<Map> lookup_start_object_map);
 
   // Creates a Smi-handler for loading an element.
   static inline Handle<Smi> LoadElement(Isolate* isolate,
                                         ElementsKind elements_kind,
                                         bool is_js_array,
                                         KeyedAccessLoadMode load_mode);
+
+  static inline Handle<Smi> TransitionAndLoadElement(
+      Isolate* isolate, ElementsKind kind_after_transition,
+      KeyedAccessLoadMode load_mode);
 
   // Creates a Smi-handler for loading from a String.
   static inline Handle<Smi> LoadIndexedString(Isolate* isolate,
@@ -254,6 +270,7 @@ V8_OBJECT class StoreHandler final : public DataHandler {
     kInterceptor,
     kSlow,
     kProxy,
+    kGeneric,     // Used for keyed stores with "1 map, many property names".
     kKindsNumber  // Keep last
   };
   using KindBits = base::BitField<Kind, 0, 4>;
@@ -268,6 +285,14 @@ V8_OBJECT class StoreHandler final : public DataHandler {
   // when storing through prototype chain. Ignored when storing to holder.
   using LookupOnLookupStartObjectBits =
       DoAccessCheckOnLookupStartObjectBits::Next<bool, 1>;
+
+  //
+  // Encoding when KindBits contains kInterceptor.
+  //
+
+  // Encodes whether the inteceptor is masking or non-masking.
+  using NonMaskingInterceptorBits =
+      LookupOnLookupStartObjectBits::Next<bool, 1>;
 
   // Applicable to kField, kAccessor and kNativeDataProperty.
 
@@ -348,8 +373,15 @@ V8_OBJECT class StoreHandler final : public DataHandler {
   // Creates a Smi-handler for storing a property to a slow object.
   static inline Handle<Smi> StoreNormal(Isolate* isolate);
 
-  // Creates a Smi-handler for storing a property to an interceptor.
-  static inline Handle<Smi> StoreInterceptor(Isolate* isolate);
+  // Creates a Smi-handler for storing a property to an object with an
+  // interceptor. Works only as a part of full handler
+  // (StoreThroughPrototype(..) or StoreInterceptorHolderIsReceiver(..)).
+  static inline Tagged<Smi> StoreInterceptor(bool non_masking);
+  // Creates handler for storing a property to receiver object with an
+  // interceptor.
+  static Handle<StoreHandler> StoreInterceptorHolderIsReceiver(
+      Isolate* isolate, DirectHandle<Map> holder_map,
+      DirectHandle<InterceptorInfo> interceptor_info);
 
   static inline Handle<Code> StoreSloppyArgumentsBuiltin(
       Isolate* isolate, KeyedAccessStoreMode mode);
@@ -359,9 +391,14 @@ V8_OBJECT class StoreHandler final : public DataHandler {
       Isolate* isolate, KeyedAccessStoreMode mode);
 
   // Creates a Smi-handler for storing a property.
+  // "Slow" calls the runtime, "Generic" uses the generic KeyedStore builtin.
+  static inline Tagged<Smi> StoreSlow(
+      KeyedAccessStoreMode store_mode = KeyedAccessStoreMode::kInBounds);
   static inline Handle<Smi> StoreSlow(
       Isolate* isolate,
       KeyedAccessStoreMode store_mode = KeyedAccessStoreMode::kInBounds);
+  static inline Handle<Smi> StoreGeneric(Isolate* isolate);
+  static inline Tagged<Smi> StoreGeneric();
 
   // Creates a Smi-handler for storing a property on a proxy.
   static inline Handle<Smi> StoreProxy(Isolate* isolate);

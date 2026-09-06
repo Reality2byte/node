@@ -99,7 +99,7 @@ int NodeBIO::Read(BIO* bio, char* out, int len) {
 
 char* NodeBIO::Peek(size_t* size) {
   *size = read_head_->write_pos_ - read_head_->read_pos_;
-  return read_head_->data_ + read_head_->read_pos_;
+  return read_head_->data_.get() + read_head_->read_pos_;
 }
 
 
@@ -112,7 +112,7 @@ size_t NodeBIO::PeekMultiple(char** out, size_t* size, size_t* count) {
   for (i = 0; i < max; i++) {
     size[i] = pos->write_pos_ - pos->read_pos_;
     total += size[i];
-    out[i] = pos->data_ + pos->read_pos_;
+    out[i] = pos->data_.get() + pos->read_pos_;
 
     /* Don't get past write head */
     if (pos == write_head_)
@@ -226,6 +226,7 @@ const BIO_METHOD* NodeBIO::GetMethod() {
   // Static initialization ensures that this is safe to use concurrently.
   static const BIO_METHOD* method = [&]() {
     BIO_METHOD* method = BIO_meth_new(BIO_TYPE_MEM, "node.js SSL buffer");
+    CHECK_NOT_NULL(method);
     BIO_meth_set_write(method, Write);
     BIO_meth_set_read(method, Read);
     BIO_meth_set_puts(method, Puts);
@@ -273,7 +274,8 @@ size_t NodeBIO::Read(char* out, size_t size) {
 
     // Copy data
     if (out != nullptr)
-      memcpy(out + offset, read_head_->data_ + read_head_->read_pos_, avail);
+      memcpy(
+          out + offset, read_head_->data_.get() + read_head_->read_pos_, avail);
     read_head_->read_pos_ += avail;
 
     // Move pointers
@@ -329,7 +331,7 @@ size_t NodeBIO::IndexOf(char delim, size_t limit) {
       avail = left;
 
     // Walk through data
-    char* tmp = current->data_ + current->read_pos_;
+    char* tmp = current->data_.get() + current->read_pos_;
     size_t off = 0;
     while (off < avail && *tmp != delim) {
       off++;
@@ -372,7 +374,7 @@ void NodeBIO::Write(const char* data, size_t size) {
       to_write = avail;
 
     // Copy data
-    memcpy(write_head_->data_ + write_head_->write_pos_,
+    memcpy(write_head_->data_.get() + write_head_->write_pos_,
            data + offset,
            to_write);
 
@@ -405,7 +407,7 @@ char* NodeBIO::PeekWritable(size_t* size) {
   if (*size == 0 || available <= *size)
     *size = available;
 
-  return write_head_->data_ + write_head_->write_pos_;
+  return write_head_->data_.get() + write_head_->write_pos_;
 }
 
 

@@ -8,6 +8,7 @@ if (!common.hasCrypto)
 const { hasOpenSSL } = require('../common/crypto');
 
 const assert = require('assert');
+const { getFips } = require('crypto');
 const { subtle } = globalThis.crypto;
 
 async function testEncrypt({ keyBuffer, algorithm, plaintext, result }) {
@@ -49,7 +50,7 @@ async function testEncryptNoEncrypt({ keyBuffer, algorithm, plaintext }) {
     ['decrypt']);
 
   return assert.rejects(subtle.encrypt(algorithm, key, plaintext), {
-    message: /The requested operation is not valid for the provided key/
+    message: /Unable to use this key to encrypt/
   });
 }
 
@@ -65,7 +66,7 @@ async function testEncryptNoDecrypt({ keyBuffer, algorithm, plaintext }) {
   const output = await subtle.encrypt(algorithm, key, plaintext);
 
   return assert.rejects(subtle.decrypt(algorithm, key, output), {
-    message: /The requested operation is not valid for the provided key/
+    message: /Unable to use this key to decrypt/
   });
 }
 
@@ -80,7 +81,23 @@ async function testEncryptWrongAlg({ keyBuffer, algorithm, plaintext }, alg) {
     ['encrypt']);
 
   return assert.rejects(subtle.encrypt(algorithm, key, plaintext), {
-    message: /The requested operation is not valid for the provided key/
+    message: /Key algorithm mismatch/
+  });
+}
+
+async function testDecryptWrongAlg({ keyBuffer, algorithm, result }, alg) {
+  if (result === undefined) return;
+  assert.notStrictEqual(algorithm.name, alg);
+  const keyFormat = alg === 'AES-OCB' ? 'raw-secret' : 'raw';
+  const key = await subtle.importKey(
+    keyFormat,
+    keyBuffer,
+    { name: alg },
+    false,
+    ['decrypt']);
+
+  return assert.rejects(subtle.decrypt(algorithm, key, result), {
+    message: /Key algorithm mismatch/
   });
 }
 
@@ -112,6 +129,7 @@ async function testDecrypt({ keyBuffer, algorithm, result }) {
       variations.push(testEncryptNoEncrypt(vector));
       variations.push(testEncryptNoDecrypt(vector));
       variations.push(testEncryptWrongAlg(vector, 'AES-CTR'));
+      variations.push(testDecryptWrongAlg(vector, 'AES-CTR'));
     });
 
     failing.forEach((vector) => {
@@ -149,6 +167,7 @@ async function testDecrypt({ keyBuffer, algorithm, result }) {
       variations.push(testEncryptNoEncrypt(vector));
       variations.push(testEncryptNoDecrypt(vector));
       variations.push(testEncryptWrongAlg(vector, 'AES-CBC'));
+      variations.push(testDecryptWrongAlg(vector, 'AES-CBC'));
     });
 
     // TODO(@jasnell): These fail for different reasons. Need to
@@ -188,6 +207,7 @@ async function testDecrypt({ keyBuffer, algorithm, result }) {
       variations.push(testEncryptNoEncrypt(vector));
       variations.push(testEncryptNoDecrypt(vector));
       variations.push(testEncryptWrongAlg(vector, 'AES-CBC'));
+      variations.push(testDecryptWrongAlg(vector, 'AES-CBC'));
     });
 
     failing.forEach((vector) => {
@@ -218,6 +238,14 @@ if (hasOpenSSL(3)) {
   } = require('../fixtures/crypto/aes_ocb')();
 
   (async function() {
+    if (getFips() === 1) {
+      await assert.rejects(
+        testEncrypt(passing[0]),
+        (err) => err.name === 'OperationError' &&
+                 err.cause?.code === 'ERR_OSSL_EVP_UNSUPPORTED');
+      return;
+    }
+
     const variations = [];
 
     passing.forEach((vector) => {
@@ -225,6 +253,7 @@ if (hasOpenSSL(3)) {
       variations.push(testEncryptNoEncrypt(vector));
       variations.push(testEncryptNoDecrypt(vector));
       variations.push(testEncryptWrongAlg(vector, 'AES-GCM'));
+      variations.push(testDecryptWrongAlg(vector, 'AES-GCM'));
     });
 
     failing.forEach((vector) => {

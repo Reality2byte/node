@@ -5,10 +5,10 @@ const common = require('../common');
 if (!common.hasCrypto)
   common.skip('missing crypto');
 
-const { hasOpenSSL } = require('../common/crypto');
+const { hasOpenSSL, isBoringSSL } = require('../common/crypto');
 
-if (!hasOpenSSL(3, 5))
-  common.skip('requires OpenSSL >= 3.5');
+if (!hasOpenSSL(3, 5) && !isBoringSSL)
+  common.skip('requires OpenSSL >= 3.5 or BoringSSL');
 
 const assert = require('assert');
 const crypto = require('crypto');
@@ -43,7 +43,7 @@ async function testVerify({ name,
     subtle.generateKey(
       {
         name: 'RSA-PSS',
-        modulusLength: 1024,
+        modulusLength: crypto.getFips() === 1 ? 2048 : 1024,
         publicExponent: new Uint8Array([1, 0, 1]),
         hash: 'SHA-256',
       },
@@ -86,26 +86,24 @@ async function testVerify({ name,
   // Test failure when using the wrong algorithms
   await assert.rejects(
     subtle.verify({ name, context }, hmacKey, signature, data), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.verify({ name, context }, rsaKeys.publicKey, signature, data), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.verify({ name, context }, ecKeys.publicKey, signature, data), {
-      message: /Unable to use this key to verify/
+      message: /Key algorithm mismatch/
     });
 
   // Test failure when too long context
   await assert.rejects(
-    subtle.verify({ name, context: new Uint8Array(256) }, publicKey, signature, data), (err) => {
-      assert.strictEqual(err.name, 'OperationError');
-      assert.strictEqual(err.cause.code, 'ERR_OUT_OF_RANGE');
-      assert.strictEqual(err.cause.message, 'context string must be at most 255 bytes');
-      return true;
+    subtle.verify({ name, context: new Uint8Array(256) }, publicKey, signature, data), {
+      name: 'OperationError',
+      message: 'ContextParams.context must be at most 255 bytes',
     });
 
   // Test failure when signature is altered
@@ -156,7 +154,7 @@ async function testSign({ name,
     subtle.generateKey(
       {
         name: 'RSA-PSS',
-        modulusLength: 1024,
+        modulusLength: crypto.getFips() === 1 ? 2048 : 1024,
         publicExponent: new Uint8Array([1, 0, 1]),
         hash: 'SHA-256',
       },
@@ -194,26 +192,24 @@ async function testSign({ name,
   // Test failure when using the wrong algorithms
   await assert.rejects(
     subtle.sign({ name, context }, hmacKey, data), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.sign({ name, context }, rsaKeys.privateKey, data), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 
   await assert.rejects(
     subtle.sign({ name, context }, ecKeys.privateKey, data), {
-      message: /Unable to use this key to sign/
+      message: /Key algorithm mismatch/
     });
 
   // Test failure when too long context
   await assert.rejects(
-    subtle.sign({ name, context: new Uint8Array(256) }, privateKey, data), (err) => {
-      assert.strictEqual(err.name, 'OperationError');
-      assert.strictEqual(err.cause.code, 'ERR_OUT_OF_RANGE');
-      assert.strictEqual(err.cause.message, 'context string must be at most 255 bytes');
-      return true;
+    subtle.sign({ name, context: new Uint8Array(256) }, privateKey, data), {
+      name: 'OperationError',
+      message: 'ContextParams.context must be at most 255 bytes',
     });
 }
 

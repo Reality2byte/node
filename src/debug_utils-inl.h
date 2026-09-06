@@ -23,6 +23,13 @@ concept StringConvertible = requires(T a) {
                                 a.ToString()
                                 } -> std::convertible_to<std::string>;
                             };
+// For std::filesystem::path and similar types
+template <typename T>
+concept StringConvertibleFSPathLike = requires(T a) {
+                                        {
+                                          a.string()
+                                          } -> std::convertible_to<std::string>;
+                                      };
 
 struct ToStringHelper {
   template <typename T>
@@ -31,25 +38,47 @@ struct ToStringHelper {
     return value.ToString();
   }
   template <typename T>
+    requires(StringConvertibleFSPathLike<T>) && (!StringViewConvertible<T>) &&
+            (!StringConvertible<T>)
+  static std::string Convert(const T& value) {
+    return value.string();
+  }
+  template <typename T>
     requires StringViewConvertible<T>
   static std::string_view Convert(const T& value) {
     return value.ToStringView();
   }
 
-  template <typename T,
-            typename test_for_number = typename std::
-                enable_if<std::is_arithmetic<T>::value, bool>::type,
-            typename dummy = bool>
-  static std::string Convert(const T& value) { return std::to_string(value); }
+  template <NumericOrEnum T>
+  static std::string Convert(const T& value) {
+    return std::to_string(value);
+  }
   static std::string_view Convert(const char* value) {
     return value != nullptr ? value : "(null)";
   }
   static std::string Convert(const std::string& value) { return value; }
   static std::string_view Convert(std::string_view value) { return value; }
   static std::string Convert(bool value) { return value ? "true" : "false"; }
-  template <unsigned BASE_BITS,
-            typename T,
-            typename = std::enable_if_t<std::is_integral_v<T>>>
+
+  static std::string Convert(v8::Local<v8::Value> value) {
+    v8::Isolate* isolate = v8::Isolate::GetCurrent();
+    if (value->IsString()) {
+      Utf8Value utf8_value(isolate, value);
+      return SPrintF("\"%s\"", utf8_value.ToString());
+    }
+    v8::MaybeLocal<v8::String> maybe_detail =
+        value->ToDetailString(isolate->GetCurrentContext());
+    v8::Local<v8::String> detail;
+    if (!maybe_detail.ToLocal(&detail)) {
+      // This will only occur when terminating. No exception is expected
+      // with `ToDetailString`.
+      return "<Unable to stringify v8::Value>";
+    }
+    Utf8Value utf8_value(isolate, detail);
+    return utf8_value.ToString();
+  }
+
+  template <unsigned BASE_BITS, std::integral T>
   static std::string BaseConvert(const T& value) {
     auto v = static_cast<uint64_t>(value);
     char ret[3 * sizeof(T)];
@@ -58,14 +87,12 @@ struct ToStringHelper {
     const char* digits = "0123456789abcdef";
     do {
       unsigned digit = v & ((1 << BASE_BITS) - 1);
-      *--ptr =
-          (BASE_BITS < 4 ? static_cast<char>('0' + digit) : digits[digit]);
+      *--ptr = (BASE_BITS < 4 ? static_cast<char>('0' + digit) : digits[digit]);
     } while ((v >>= BASE_BITS) != 0);
     return ptr;
   }
-  template <unsigned BASE_BITS,
-            typename T,
-            typename = std::enable_if_t<!std::is_integral_v<T>>>
+  template <unsigned BASE_BITS, typename T>
+    requires(!std::integral<T>)
   static auto BaseConvert(T&& value) {
     return Convert(std::forward<T>(value));
   }
@@ -139,12 +166,10 @@ std::string COLD_NOINLINE SPrintFImpl(  // NOLINT(runtime/string)
       ret += node::ToUpper(ToBaseString<4>(arg));
       break;
     case 'p': {
-      CHECK(std::is_pointer<typename std::remove_reference<Arg>::type>::value);
+      CHECK(std::is_pointer_v<typename std::remove_reference_t<Arg>>);
       char out[20];
-      int n = snprintf(out,
-                       sizeof(out),
-                       "%p",
-                       *reinterpret_cast<const void* const*>(&arg));
+      int n = snprintf(
+          out, sizeof(out), "%p", *reinterpret_cast<const void* const*>(&arg));
       CHECK_GE(n, 0);
       ret += out;
       break;

@@ -1,22 +1,13 @@
 'use strict';
 const { skipIfSQLiteMissing } = require('../common');
 skipIfSQLiteMissing();
-const tmpdir = require('../common/tmpdir');
-const { join } = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { suite, test } = require('node:test');
-let cnt = 0;
-
-tmpdir.refresh();
-
-function nextDb() {
-  return join(tmpdir.path, `database-${cnt++}.db`);
-}
 
 suite('data binding and mapping', () => {
   test('supported data types', (t) => {
     const u8a = new TextEncoder().encode('a☃b☃c');
-    const db = new DatabaseSync(nextDb());
+    const db = new DatabaseSync(':memory:');
     t.after(() => { db.close(); });
     const setup = db.exec(`
       CREATE TABLE types(
@@ -80,10 +71,54 @@ suite('data binding and mapping', () => {
       text: '',
       buf: new Uint8Array(),
     });
+
+    t.assert.deepStrictEqual(
+      stmt.run(5, true, false, true, null),
+      { changes: 1, lastInsertRowid: 5 }
+    );
+    t.assert.deepStrictEqual(
+      query.get(5),
+      { __proto__: null, key: 5, int: 1, double: 0, text: '1', buf: null }
+    );
+  });
+
+  test('large strings are bound correctly', (t) => {
+    const db = new DatabaseSync(':memory:');
+    t.after(() => { db.close(); });
+    const setup = db.exec(
+      'CREATE TABLE data(key INTEGER PRIMARY KEY, text TEXT) STRICT;'
+    );
+    t.assert.strictEqual(setup, undefined);
+
+    t.assert.deepStrictEqual(
+      db.prepare('INSERT INTO data (key, text) VALUES (?, ?)').run(1, ''),
+      { changes: 1, lastInsertRowid: 1 },
+    );
+
+    const update = db.prepare('UPDATE data SET text = ? WHERE key = 1');
+
+    // > 1024 bytes so `Utf8Value` uses heap storage internally.
+    const largeAscii = 'a'.repeat(8 * 1024);
+    // Force a non-one-byte string path through UTF-8 conversion.
+    const largeUnicode = '\u2603'.repeat(2048);
+
+    const res = update.run(largeAscii);
+    t.assert.strictEqual(res.changes, 1);
+
+    t.assert.strictEqual(
+      db.prepare('SELECT text FROM data WHERE key = 1').get().text,
+      largeAscii,
+    );
+
+    t.assert.strictEqual(update.run(largeUnicode).changes, 1);
+    t.assert.strictEqual(
+      db.prepare('SELECT text FROM data WHERE key = 1').get().text,
+      largeUnicode,
+    );
   });
 
   test('unsupported data types', (t) => {
-    const db = new DatabaseSync(nextDb());
+    const db = new DatabaseSync(':memory:');
     t.after(() => { db.close(); });
     const setup = db.exec(
       'CREATE TABLE types(key INTEGER PRIMARY KEY, val INTEGER) STRICT;'
@@ -118,7 +153,7 @@ suite('data binding and mapping', () => {
 
   test('throws when binding a BigInt that is too large', (t) => {
     const max = 9223372036854775807n; // Largest 64-bit signed integer value.
-    const db = new DatabaseSync(nextDb());
+    const db = new DatabaseSync(':memory:');
     t.after(() => { db.close(); });
     const setup = db.exec(
       'CREATE TABLE types(key INTEGER PRIMARY KEY, val INTEGER) STRICT;'
@@ -138,7 +173,7 @@ suite('data binding and mapping', () => {
   });
 
   test('statements are unbound on each call', (t) => {
-    const db = new DatabaseSync(nextDb());
+    const db = new DatabaseSync(':memory:');
     t.after(() => { db.close(); });
     const setup = db.exec(
       'CREATE TABLE data(key INTEGER PRIMARY KEY, val INTEGER) STRICT;'

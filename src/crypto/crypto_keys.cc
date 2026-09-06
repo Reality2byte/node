@@ -5,13 +5,14 @@
 #include "crypto/crypto_dh.h"
 #include "crypto/crypto_dsa.h"
 #include "crypto/crypto_ec.h"
-#include "crypto/crypto_ml_dsa.h"
+#include "crypto/crypto_pqc.h"
 #include "crypto/crypto_rsa.h"
 #include "crypto/crypto_util.h"
 #include "env-inl.h"
 #include "memory_tracker-inl.h"
 #include "node.h"
 #include "node_buffer.h"
+#include "permission/permission.h"
 #include "string_bytes.h"
 #include "threadpoolwork-inl.h"
 #include "util-inl.h"
@@ -19,13 +20,15 @@
 
 namespace node {
 
+using ncrypto::BignumPointer;
 using ncrypto::BIOPointer;
 using ncrypto::ECKeyPointer;
+using ncrypto::ECPointPointer;
 using ncrypto::EVPKeyCtxPointer;
 using ncrypto::EVPKeyPointer;
 using ncrypto::MarkPopErrorOnReturn;
-using ncrypto::PKCS8Pointer;
 using v8::Array;
+using v8::Boolean;
 using v8::Context;
 using v8::Function;
 using v8::FunctionCallbackInfo;
@@ -65,7 +68,16 @@ Maybe<EVPKeyPointer::AsymmetricKeyEncodingConfig> GetKeyFormatAndTypeFromJs(
     config.format = static_cast<EVPKeyPointer::PKFormatType>(
         args[*offset].As<Int32>()->Value());
 
-    if (args[*offset + 1]->IsInt32()) {
+    if (config.format == EVPKeyPointer::PKFormatType::RAW_PUBLIC ||
+        config.format == EVPKeyPointer::PKFormatType::RAW_PRIVATE ||
+        config.format == EVPKeyPointer::PKFormatType::RAW_SEED) {
+      // Raw formats use the type slot for ec_point_form (int) or null.
+      if (args[*offset + 1]->IsInt32()) {
+        config.ec_point_form = args[*offset + 1].As<Int32>()->Value();
+      } else {
+        CHECK(args[*offset + 1]->IsNullOrUndefined());
+      }
+    } else if (args[*offset + 1]->IsInt32()) {
       config.type = static_cast<EVPKeyPointer::PKEncodingType>(
           args[*offset + 1].As<Int32>()->Value());
     } else {
@@ -86,8 +98,15 @@ MaybeLocal<Value> ToV8Value(
     Environment* env,
     const BIOPointer& bio,
     const EVPKeyPointer::AsymmetricKeyEncodingConfig& config) {
-  if (!bio) return {};
+  if (!bio) {
+    THROW_ERR_CRYPTO_OPERATION_FAILED(env, "Invalid BIO pointer");
+    return {};
+  }
   BUF_MEM* bptr = bio;
+  if (!bptr) {
+    THROW_ERR_CRYPTO_OPERATION_FAILED(env, "Unable to create BUF_MEM pointer");
+    return {};
+  }
   if (config.format == EVPKeyPointer::PKFormatType::PEM) {
     // PEM is an ASCII format, so we will return it as a string.
     return String::NewFromUtf8(
@@ -138,9 +157,11 @@ bool ExportJWKSecretKey(Environment* env,
                              BASE64URL)
              .ToLocal(&raw) &&
          target
-             ->Set(env->context(), env->jwk_kty_string(), env->jwk_oct_string())
-             .IsJust() &&
-         target->Set(env->context(), env->jwk_k_string(), raw).IsJust();
+             ->DefineOwnProperty(
+                 env->context(), env->jwk_kty_string(), env->jwk_oct_string())
+             .FromMaybe(false) &&
+         target->DefineOwnProperty(env->context(), env->jwk_k_string(), raw)
+             .FromMaybe(false);
 }
 
 KeyObjectData ImportJWKSecretKey(Environment* env, Local<Object> jwk) {
@@ -160,7 +181,11 @@ bool ExportJWKAsymmetricKey(Environment* env,
                             const KeyObjectData& key,
                             Local<Object> target,
                             bool handleRsaPss) {
-  switch (key.GetAsymmetricKey().id()) {
+  const int id = key.GetAsymmetricKey().id();
+#if OPENSSL_WITH_PQC
+  if (IsPqcKeyId(id)) return ExportJwkPqcKey(env, key, target);
+#endif
+  switch (id) {
     case EVP_PKEY_RSA_PSS: {
       if (handleRsaPss) return ExportJWKRsaKey(env, key, target);
       break;
@@ -170,40 +195,13 @@ bool ExportJWKAsymmetricKey(Environment* env,
     case EVP_PKEY_EC:
       return ExportJWKEcKey(env, key, target);
     case EVP_PKEY_ED25519:
-      // Fall through
     case EVP_PKEY_ED448:
-      // Fall through
     case EVP_PKEY_X25519:
-      // Fall through
     case EVP_PKEY_X448:
       return ExportJWKEdKey(env, key, target);
-#if OPENSSL_WITH_PQC
-    case EVP_PKEY_ML_DSA_44:
-      // Fall through
-    case EVP_PKEY_ML_DSA_65:
-      // Fall through
-    case EVP_PKEY_ML_DSA_87:
-      return ExportJwkMlDsaKey(env, key, target);
-#endif
   }
   THROW_ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE(env);
   return false;
-}
-
-KeyObjectData ImportJWKAsymmetricKey(Environment* env,
-                                     Local<Object> jwk,
-                                     std::string_view kty,
-                                     const FunctionCallbackInfo<Value>& args,
-                                     unsigned int offset) {
-  if (kty == "RSA") {
-    return ImportJWKRsaKey(env, jwk, args, offset);
-  } else if (kty == "EC") {
-    return ImportJWKEcKey(env, jwk, args, offset);
-  }
-
-  THROW_ERR_CRYPTO_INVALID_JWK(
-      env, "%s is not a supported JWK key type", kty.data());
-  return {};
 }
 
 bool GetSecretKeyDetail(Environment* env,
@@ -271,33 +269,102 @@ bool ExportJWKInner(Environment* env,
 }
 
 int GetNidFromName(const char* name) {
-  int nid;
-  if (strcmp(name, "Ed25519") == 0) {
-    nid = EVP_PKEY_ED25519;
-  } else if (strcmp(name, "Ed448") == 0) {
-    nid = EVP_PKEY_ED448;
-  } else if (strcmp(name, "X25519") == 0) {
-    nid = EVP_PKEY_X25519;
-  } else if (strcmp(name, "X448") == 0) {
-    nid = EVP_PKEY_X448;
-#if OPENSSL_WITH_PQC
-  } else if (strcmp(name, "ML-DSA-44") == 0) {
-    nid = EVP_PKEY_ML_DSA_44;
-  } else if (strcmp(name, "ML-DSA-65") == 0) {
-    nid = EVP_PKEY_ML_DSA_65;
-  } else if (strcmp(name, "ML-DSA-87") == 0) {
-    nid = EVP_PKEY_ML_DSA_87;
-  } else if (strcmp(name, "ML-KEM-512") == 0) {
-    nid = EVP_PKEY_ML_KEM_512;
-  } else if (strcmp(name, "ML-KEM-768") == 0) {
-    nid = EVP_PKEY_ML_KEM_768;
-  } else if (strcmp(name, "ML-KEM-1024") == 0) {
-    nid = EVP_PKEY_ML_KEM_1024;
-#endif
-  } else {
-    nid = NID_undef;
+  static constexpr struct {
+    const char* name;
+    int nid;
+  } kNameToNid[] = {
+      {"Ed25519", EVP_PKEY_ED25519},
+      {"Ed448", EVP_PKEY_ED448},
+      {"X25519", EVP_PKEY_X25519},
+      {"X448", EVP_PKEY_X448},
+  };
+  for (const auto& entry : kNameToNid) {
+    if (StringEqualNoCase(name, entry.name)) return entry.nid;
   }
-  return nid;
+#if OPENSSL_WITH_PQC
+  return GetPqcNidFromName(name);
+#else
+  return NID_undef;
+#endif
+}
+
+bool IsUnavailablePqcKeyType(Environment* env, Local<String> key_type) {
+  return key_type->StringEquals(env->crypto_ml_dsa_44_string()) ||
+         key_type->StringEquals(env->crypto_ml_dsa_65_string()) ||
+         key_type->StringEquals(env->crypto_ml_dsa_87_string()) ||
+         key_type->StringEquals(env->crypto_ml_kem_512_string()) ||
+         key_type->StringEquals(env->crypto_ml_kem_768_string()) ||
+         key_type->StringEquals(env->crypto_ml_kem_1024_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_sha2_128f_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_sha2_128s_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_sha2_192f_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_sha2_192s_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_sha2_256f_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_sha2_256s_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_shake_128f_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_shake_128s_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_shake_192f_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_shake_192s_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_shake_256f_string()) ||
+         key_type->StringEquals(env->crypto_slh_dsa_shake_256s_string());
+}
+
+bool IsUnsupportedRawKeyType(Environment* env, Local<String> key_type) {
+  return key_type->StringEquals(env->crypto_rsa_string()) ||
+         key_type->StringEquals(env->crypto_rsa_pss_string()) ||
+         key_type->StringEquals(env->crypto_dsa_string()) ||
+         key_type->StringEquals(env->crypto_dh_string());
+}
+
+void ValidateRawKeyImportFormat(Environment* env,
+                                Local<String> key_type,
+                                const char* key_type_name,
+                                int id,
+                                EVPKeyPointer::PKFormatType format) {
+  auto validate_raw_format =
+      [&](EVPKeyPointer::PKFormatType expected_private_format) {
+        if (format == EVPKeyPointer::PKFormatType::RAW_PUBLIC ||
+            format == expected_private_format) {
+          return;
+        }
+        THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+      };
+
+  if (key_type->StringEquals(env->crypto_ec_string())) {
+    return validate_raw_format(EVPKeyPointer::PKFormatType::RAW_PRIVATE);
+  }
+
+  switch (id) {
+    case EVP_PKEY_X25519:
+    case EVP_PKEY_X448:
+    case EVP_PKEY_ED25519:
+    case EVP_PKEY_ED448:
+      return validate_raw_format(EVPKeyPointer::PKFormatType::RAW_PRIVATE);
+    default:
+      break;
+  }
+
+#if OPENSSL_WITH_PQC
+  if (IsPqcSeedKeyId(id)) {
+    return validate_raw_format(EVPKeyPointer::PKFormatType::RAW_SEED);
+  }
+  if (IsPqcRawPrivateKeyId(id)) {
+    return validate_raw_format(EVPKeyPointer::PKFormatType::RAW_PRIVATE);
+  }
+#endif
+
+  if (IsUnavailablePqcKeyType(env, key_type)) {
+    THROW_ERR_INVALID_ARG_VALUE(env, "Unsupported key type");
+    return;
+  }
+
+  if (IsUnsupportedRawKeyType(env, key_type)) {
+    THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+    return;
+  }
+
+  THROW_ERR_INVALID_ARG_VALUE(
+      env, "Invalid asymmetricKeyType: %s", key_type_name);
 }
 }  // namespace
 
@@ -315,6 +382,43 @@ bool KeyObjectData::ToEncodedPublicKey(
     *out = Object::New(env->isolate());
     return ExportJWKInner(
         env, addRefWithType(KeyType::kKeyTypePublic), *out, false);
+  } else if (config.format == EVPKeyPointer::PKFormatType::RAW_PUBLIC) {
+    Mutex::ScopedLock lock(mutex());
+    const auto& pkey = GetAsymmetricKey();
+    if (pkey.id() == EVP_PKEY_EC) {
+      ECKeyPointer ec_key(pkey);
+      if (!ec_key) {
+        THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+        return false;
+      }
+      // A provider-backed key need not expose its public point.
+      if (ec_key.getPublicKey() == nullptr) {
+        THROW_ERR_CRYPTO_OPERATION_FAILED(env,
+                                          "Failed to export EC public key");
+        return false;
+      }
+      auto form = static_cast<point_conversion_form_t>(config.ec_point_form);
+      const auto group = ec_key.getGroup();
+      const auto point = ec_key.getPublicKey();
+      return ECPointToBuffer(env, group, point, form).ToLocal(out);
+    }
+    const int id = pkey.id();
+    bool is_raw_supported = id == EVP_PKEY_ED25519 || id == EVP_PKEY_ED448 ||
+                            id == EVP_PKEY_X25519 || id == EVP_PKEY_X448;
+#if OPENSSL_WITH_PQC
+    is_raw_supported = is_raw_supported || IsPqcKeyId(id);
+#endif
+    if (!is_raw_supported) {
+      THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+      return false;
+    }
+    auto raw_data = pkey.rawPublicKey();
+    if (!raw_data) {
+      THROW_ERR_CRYPTO_OPERATION_FAILED(env, "Failed to get raw public key");
+      return false;
+    }
+    return Buffer::Copy(env, raw_data.get<const char>(), raw_data.size())
+        .ToLocal(out);
   }
 
   return WritePublicKey(env, GetAsymmetricKey(), config).ToLocal(out);
@@ -333,6 +437,72 @@ bool KeyObjectData::ToEncodedPrivateKey(
     *out = Object::New(env->isolate());
     return ExportJWKInner(
         env, addRefWithType(KeyType::kKeyTypePrivate), *out, false);
+  } else if (config.format == EVPKeyPointer::PKFormatType::RAW_PRIVATE) {
+    Mutex::ScopedLock lock(mutex());
+    const auto& pkey = GetAsymmetricKey();
+    if (pkey.id() == EVP_PKEY_EC) {
+      ECKeyPointer ec_key(pkey);
+      if (!ec_key) {
+        THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+        return false;
+      }
+      const BIGNUM* private_key = ec_key.getPrivateKey();
+      if (private_key == nullptr) {
+        THROW_ERR_CRYPTO_OPERATION_FAILED(env,
+                                          "Failed to export EC private key");
+        return false;
+      }
+      const auto group = ec_key.getGroup();
+      auto order = BignumPointer::New();
+      if (!order || !EC_GROUP_get_order(group, order.get(), nullptr)) {
+        THROW_ERR_CRYPTO_OPERATION_FAILED(env,
+                                          "Failed to export EC private key");
+        return false;
+      }
+      auto buf = BignumPointer::EncodePadded(private_key, order.byteLength());
+      if (!buf) {
+        THROW_ERR_CRYPTO_OPERATION_FAILED(env,
+                                          "Failed to export EC private key");
+        return false;
+      }
+      return Buffer::Copy(env, buf.get<const char>(), buf.size()).ToLocal(out);
+    }
+    const int id = pkey.id();
+    bool is_raw_supported = id == EVP_PKEY_ED25519 || id == EVP_PKEY_ED448 ||
+                            id == EVP_PKEY_X25519 || id == EVP_PKEY_X448;
+#if OPENSSL_WITH_PQC
+    is_raw_supported = is_raw_supported || IsPqcRawPrivateKeyId(id);
+#endif
+    if (!is_raw_supported) {
+      THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+      return false;
+    }
+    auto raw_data = pkey.rawPrivateKey();
+    if (!raw_data) {
+      THROW_ERR_CRYPTO_OPERATION_FAILED(env, "Failed to get raw private key");
+      return false;
+    }
+    return Buffer::Copy(env, raw_data.get<const char>(), raw_data.size())
+        .ToLocal(out);
+  } else if (config.format == EVPKeyPointer::PKFormatType::RAW_SEED) {
+#if OPENSSL_WITH_PQC
+    Mutex::ScopedLock lock(mutex());
+    const auto& pkey = GetAsymmetricKey();
+    if (!IsPqcSeedKeyId(pkey.id())) {
+      THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+      return false;
+    }
+    auto raw_data = pkey.rawSeed();
+    if (!raw_data) {
+      THROW_ERR_CRYPTO_OPERATION_FAILED(env, "Failed to get raw seed");
+      return false;
+    }
+    return Buffer::Copy(env, raw_data.get<const char>(), raw_data.size())
+        .ToLocal(out);
+#else
+    THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+    return false;
+#endif
   }
 
   return WritePrivateKey(env, GetAsymmetricKey(), config).ToLocal(out);
@@ -353,6 +523,14 @@ KeyObjectData::GetPrivateKeyEncodingFromJs(
   if (config.output_key_object) {
     if (context != kKeyContextInput)
       (*offset)++;
+  } else if (config.format == EVPKeyPointer::PKFormatType::RAW_PRIVATE ||
+             config.format == EVPKeyPointer::PKFormatType::RAW_SEED) {
+    // Raw formats don't support encryption. Still consume the arg offsets.
+    if (context != kKeyContextInput) {
+      CHECK(args[*offset]->IsNullOrUndefined());
+      (*offset)++;
+    }
+    CHECK(args[*offset]->IsNullOrUndefined());
   } else {
     bool needs_passphrase = false;
     if (context != kKeyContextInput) {
@@ -396,12 +574,325 @@ KeyObjectData::GetPublicKeyEncodingFromJs(
   return GetKeyFormatAndTypeFromJs(args, offset, context);
 }
 
+// Shared helper for importing raw asymmetric keys. Called from
+// ImportRawKeyFromArgs.
+static KeyObjectData ImportRawKey(Environment* env,
+                                  const unsigned char* key_data,
+                                  size_t key_data_len,
+                                  EVPKeyPointer::PKFormatType format,
+                                  Local<String> key_type,
+                                  const char* key_type_name,
+                                  const char* named_curve,
+                                  KeyType target_type) {
+  auto throw_invalid = [&]() {
+    if (!env->isolate()->HasPendingException()) {
+      THROW_ERR_INVALID_ARG_VALUE(env, "Invalid key data");
+    }
+  };
+
+  const int id = GetNidFromName(key_type_name);
+  ValidateRawKeyImportFormat(env, key_type, key_type_name, id, format);
+  if (env->isolate()->HasPendingException()) {
+    return {};
+  }
+
+  // EC keys
+  if (key_type->StringEquals(env->crypto_ec_string())) {
+    int curve_nid = ncrypto::Ec::GetCurveIdFromName(named_curve);
+    if (curve_nid == NID_undef) {
+      THROW_ERR_CRYPTO_INVALID_CURVE(env);
+      return {};
+    }
+    auto eckey = ECKeyPointer::NewByCurveName(curve_nid);
+    if (!eckey) {
+      throw_invalid();
+      return {};
+    }
+    if (format == EVPKeyPointer::PKFormatType::RAW_PUBLIC) {
+      const auto group = eckey.getGroup();
+      auto pub = ECPointPointer::New(group);
+      if (!pub) {
+        throw_invalid();
+        return {};
+      }
+      ncrypto::Buffer<const unsigned char> buffer{
+          .data = key_data,
+          .len = key_data_len,
+      };
+      if (!pub.setFromBuffer(buffer, group) || !eckey.setPublicKey(pub)) {
+        throw_invalid();
+        return {};
+      }
+    } else {
+      const auto group = eckey.getGroup();
+      auto order = BignumPointer::New();
+      CHECK(order);
+      CHECK(EC_GROUP_get_order(group, order.get(), nullptr));
+      if (key_data_len != order.byteLength()) {
+        throw_invalid();
+        return {};
+      }
+      BignumPointer priv_bn(key_data, key_data_len);
+      if (!priv_bn || !eckey.setPrivateKey(priv_bn)) {
+        throw_invalid();
+        return {};
+      }
+      auto pub_point = ECPointPointer::New(group);
+      if (!pub_point || !pub_point.mul(group, priv_bn.get()) ||
+          !eckey.setPublicKey(pub_point)) {
+        throw_invalid();
+        return {};
+      }
+    }
+    auto pkey = EVPKeyPointer::New();
+    if (!pkey.assign(eckey)) {
+      throw_invalid();
+      return {};
+    }
+#if NCRYPTO_USE_LEGACY_KEY_TYPES
+    eckey.release();
+#endif
+    return KeyObjectData::CreateAsymmetric(target_type, std::move(pkey));
+  }
+
+  typedef EVPKeyPointer (*new_key_fn)(
+      int, const ncrypto::Buffer<const unsigned char>&);
+  new_key_fn fn = nullptr;
+  switch (id) {
+    case EVP_PKEY_X25519:
+    case EVP_PKEY_X448:
+    case EVP_PKEY_ED25519:
+    case EVP_PKEY_ED448:
+      fn = target_type == kKeyTypePrivate ? EVPKeyPointer::NewRawPrivate
+                                          : EVPKeyPointer::NewRawPublic;
+      break;
+    default:
+#if OPENSSL_WITH_PQC
+      if (IsPqcKeyId(id)) {
+        if (target_type == kKeyTypePrivate) {
+          fn = IsPqcSeedKeyId(id) ? EVPKeyPointer::NewRawSeed
+                                  : EVPKeyPointer::NewRawPrivate;
+        } else {
+          fn = EVPKeyPointer::NewRawPublic;
+        }
+      }
+#endif
+      break;
+  }
+
+  if (fn != nullptr) {
+    auto pkey = fn(id,
+                   ncrypto::Buffer<const unsigned char>{
+                       .data = key_data,
+                       .len = key_data_len,
+                   });
+    if (!pkey) {
+      throw_invalid();
+      return {};
+    }
+    return KeyObjectData::CreateAsymmetric(target_type, std::move(pkey));
+  }
+
+  return {};
+}
+
+// Shared helper for importing a JWK asymmetric key.  Extracts kty from the
+// JWK object and dispatches to the appropriate importer.
+static KeyObjectData ImportJWKFromArgs(Environment* env, Local<Object> jwk) {
+  Local<Value> kty;
+  if (!jwk->Get(env->context(), env->jwk_kty_string()).ToLocal(&kty) ||
+      !kty->IsString()) {
+    THROW_ERR_CRYPTO_INVALID_JWK(env);
+    return {};
+  }
+  Utf8Value kty_string(env->isolate(), kty);
+  if (*kty_string == std::string_view("RSA")) {
+    return ImportJWKRsaKey(env, jwk);
+  } else if (*kty_string == std::string_view("EC")) {
+    return ImportJWKEcKey(env, jwk);
+  } else if (*kty_string == std::string_view("OKP")) {
+    return ImportJWKEdKey(env, jwk);
+  } else if (*kty_string == std::string_view("AKP")) {
+#if OPENSSL_WITH_PQC
+    return ImportJWKPqcKey(env, jwk);
+#else
+    THROW_ERR_INVALID_ARG_VALUE(env, "Unsupported key type");
+    return {};
+#endif
+  }
+
+  THROW_ERR_CRYPTO_INVALID_JWK(
+      env, "%s is not a supported JWK key type", *kty_string);
+  return {};
+}
+
+// Shared helper for importing raw asymmetric keys from positional args.
+// args layout: [... offset+0: buffer, offset+1: formatInt,
+//               offset+2: asymmetricKeyType, offset+3: passphrase,
+//               offset+4: namedCurve]
+static KeyObjectData ImportRawKeyFromArgs(
+    const FunctionCallbackInfo<Value>& args, unsigned int offset) {
+  Environment* env = Environment::GetCurrent(args);
+
+  auto format = static_cast<EVPKeyPointer::PKFormatType>(
+      args[offset + 1].As<Int32>()->Value());
+  KeyType type = (format == EVPKeyPointer::PKFormatType::RAW_PUBLIC)
+                     ? kKeyTypePublic
+                     : kKeyTypePrivate;
+
+  ArrayBufferOrViewContents<unsigned char> key_data(args[offset]);
+  if (!key_data.CheckSizeInt32()) [[unlikely]] {
+    THROW_ERR_OUT_OF_RANGE(env, "keyData is too big");
+    return {};
+  }
+
+  CHECK(args[offset + 2]->IsString());
+  Local<String> key_type = args[offset + 2].As<String>();
+  Utf8Value key_type_name(env->isolate(), key_type);
+
+  DCHECK_IMPLIES(key_type->StringEquals(env->crypto_ec_string()),
+                 args[offset + 4]->IsString());
+  Utf8Value curve(env->isolate(),
+                  args[offset + 4]->IsString() ? args[offset + 4].As<String>()
+                                               : String::Empty(env->isolate()));
+
+  return ImportRawKey(env,
+                      key_data.data(),
+                      key_data.size(),
+                      format,
+                      key_type,
+                      *key_type_name,
+                      *curve,
+                      type);
+}
+
 KeyObjectData KeyObjectData::GetPrivateKeyFromJs(
     const v8::FunctionCallbackInfo<v8::Value>& args,
     unsigned int* offset,
     bool allow_key_object) {
+  Environment* env = Environment::GetCurrent(args);
+
+  // Store descriptor: data is a { uri, properties } object, format int is
+  // STORE, and the passphrase slot carries an optional passphrase/PIN.
+  if (args[*offset]->IsObject() && !IsAnyBufferSource(args[*offset]) &&
+      args[*offset + 1]->IsInt32() &&
+      static_cast<EVPKeyPointer::PKFormatType>(
+          args[*offset + 1].As<Int32>()->Value()) ==
+          EVPKeyPointer::PKFormatType::STORE) {
+    Local<Object> store = args[*offset].As<Object>();
+    Local<Value> uri_value;
+    if (!store
+             ->Get(env->context(), FIXED_ONE_BYTE_STRING(env->isolate(), "uri"))
+             .ToLocal(&uri_value)) {
+      return {};
+    }
+    CHECK(uri_value->IsString());
+    Utf8Value uri(env->isolate(), uri_value);
+
+    Local<Value> properties_value;
+    if (!store
+             ->Get(env->context(),
+                   FIXED_ONE_BYTE_STRING(env->isolate(), "properties"))
+             .ToLocal(&properties_value)) {
+      return {};
+    }
+    std::string properties_storage;
+    std::optional<std::string_view> properties;
+    if (properties_value->IsString()) {
+      Utf8Value properties_string(env->isolate(), properties_value);
+      std::string_view properties_view = properties_string.ToStringView();
+      properties_storage.assign(properties_view.data(), properties_view.size());
+      properties = std::string_view(properties_storage);
+    } else {
+      CHECK(properties_value->IsNullOrUndefined());
+    }
+
+    // OpenSSLStore is a global permission. URIs passed to STORE loaders can
+    // contain credentials, so they must not be exposed through permission
+    // errors or diagnostics.
+    THROW_IF_INSUFFICIENT_PERMISSIONS(
+        env, permission::PermissionScope::kOpenSSLStore, "", KeyObjectData());
+
+    std::optional<ArrayBufferOrViewContents<char>> passphrase_content;
+    std::optional<ncrypto::Buffer<const char>> passphrase;
+    if (IsAnyBufferSource(args[*offset + 3])) {
+      passphrase_content.emplace(args[*offset + 3]);
+      if (!passphrase_content->CheckSizeInt32()) [[unlikely]] {
+        THROW_ERR_OUT_OF_RANGE(env, "passphrase is too big");
+        return {};
+      }
+      passphrase = ncrypto::Buffer<const char>{
+          .data = passphrase_content->data(),
+          .len = passphrase_content->size(),
+      };
+    } else {
+      CHECK(args[*offset + 3]->IsNullOrUndefined());
+    }
+
+    *offset += 5;
+    EVPKeyPointer::StorePrivateKeyConfig config{
+        .uri = uri.ToStringView(),
+        .properties = properties,
+        .passphrase = passphrase,
+    };
+    auto res = EVPKeyPointer::TryLoadPrivateKeyFromStore(config);
+    if (res) {
+      return CreateAsymmetric(KeyType::kKeyTypePrivate, std::move(res.value));
+    }
+    switch (res.error.value()) {
+      case EVPKeyPointer::PKParseError::NEED_PASSPHRASE:
+        ERR_clear_error();
+        THROW_ERR_MISSING_PASSPHRASE(env,
+                                     "Passphrase required for encrypted key");
+        break;
+      case EVPKeyPointer::PKParseError::NOT_RECOGNIZED:
+        ERR_clear_error();
+        THROW_ERR_CRYPTO_OPERATION_FAILED(
+            env, "No private key found through the OpenSSL STORE loader");
+        break;
+      default: {
+        static constexpr const char* msg =
+            "Failed to load private key through an OpenSSL STORE loader";
+        // A loader may report a failure without leaving anything in the error
+        // queue, in which case ThrowCryptoError() would produce a bare Error
+        // carrying no code at all.
+        if (res.openssl_error.value_or(0) == 0) {
+          THROW_ERR_CRYPTO_OPERATION_FAILED(env, msg);
+        } else {
+          ThrowCryptoError(env, res.openssl_error.value(), msg);
+        }
+        break;
+      }
+    }
+    return {};
+  }
+
+  // Object formats: data is a JS Object (not buffer), format int determines
+  // whether this is a JWK or an OpenSSL STORE loader descriptor.
+  if (args[*offset]->IsObject() && !IsAnyBufferSource(args[*offset]) &&
+      args[*offset + 1]->IsInt32()) {
+    auto format = static_cast<EVPKeyPointer::PKFormatType>(
+        args[*offset + 1].As<Int32>()->Value());
+    if (format == EVPKeyPointer::PKFormatType::JWK) {
+      auto data = ImportJWKFromArgs(env, args[*offset].As<Object>());
+      *offset += 5;
+      return data;
+    }
+  }
+
   if (args[*offset]->IsString() || IsAnyBufferSource(args[*offset])) {
-    Environment* env = Environment::GetCurrent(args);
+    // Raw format: buffer + raw format int.
+    if (args[*offset + 1]->IsInt32()) {
+      auto format = static_cast<EVPKeyPointer::PKFormatType>(
+          args[*offset + 1].As<Int32>()->Value());
+      if (format == EVPKeyPointer::PKFormatType::RAW_PRIVATE ||
+          format == EVPKeyPointer::PKFormatType::RAW_SEED) {
+        auto data = ImportRawKeyFromArgs(args, *offset);
+        *offset += 5;
+        return data;
+      }
+    }
+
     auto key = ByteSource::FromStringOrBuffer(env, args[(*offset)++]);
 
     EVPKeyPointer::PrivateKeyEncodingConfig config;
@@ -409,6 +900,9 @@ KeyObjectData KeyObjectData::GetPrivateKeyFromJs(
              .To(&config)) {
       return {};
     }
+
+    // Skip the namedCurve argument (only used by raw format imports).
+    (*offset)++;
 
     return TryParsePrivateKey(
         env,
@@ -423,14 +917,51 @@ KeyObjectData KeyObjectData::GetPrivateKeyFromJs(
   KeyObjectHandle* key;
   ASSIGN_OR_RETURN_UNWRAP(&key, args[*offset].As<Object>(), KeyObjectData());
   CHECK_EQ(key->Data().GetKeyType(), kKeyTypePrivate);
-  (*offset) += 4;
+  (*offset) += 5;
   return key->Data().addRef();
 }
 
 KeyObjectData KeyObjectData::GetPublicOrPrivateKeyFromJs(
-    const FunctionCallbackInfo<Value>& args, unsigned int* offset) {
-  if (IsAnyBufferSource(args[*offset])) {
-    Environment* env = Environment::GetCurrent(args);
+    const FunctionCallbackInfo<Value>& args,
+    unsigned int* offset,
+    bool allow_private_key_store) {
+  Environment* env = Environment::GetCurrent(args);
+
+  // JWK format: data is a JS Object (not buffer), format int is JWK.
+  if (args[*offset]->IsObject() && !IsAnyBufferSource(args[*offset]) &&
+      args[*offset + 1]->IsInt32()) {
+    auto format = static_cast<EVPKeyPointer::PKFormatType>(
+        args[*offset + 1].As<Int32>()->Value());
+    if (format == EVPKeyPointer::PKFormatType::JWK) {
+      auto data = ImportJWKFromArgs(env, args[*offset].As<Object>());
+      *offset += 5;
+      return data;
+    }
+    if (format == EVPKeyPointer::PKFormatType::STORE) {
+      if (allow_private_key_store) {
+        return GetPrivateKeyFromJs(args, offset, false);
+      }
+      THROW_ERR_INVALID_ARG_VALUE(
+          env,
+          "URLs for OpenSSL STORE loaders are only accepted for private keys");
+      return {};
+    }
+  }
+
+  if (args[*offset]->IsString() || IsAnyBufferSource(args[*offset])) {
+    // Raw format: buffer + raw format int.
+    if (args[*offset + 1]->IsInt32()) {
+      auto format = static_cast<EVPKeyPointer::PKFormatType>(
+          args[*offset + 1].As<Int32>()->Value());
+      if (format == EVPKeyPointer::PKFormatType::RAW_PUBLIC ||
+          format == EVPKeyPointer::PKFormatType::RAW_PRIVATE ||
+          format == EVPKeyPointer::PKFormatType::RAW_SEED) {
+        auto data = ImportRawKeyFromArgs(args, *offset);
+        *offset += 5;
+        return data;
+      }
+    }
+
     ArrayBufferOrViewContents<char> data(args[(*offset)++]);
     if (!data.CheckSizeInt32()) [[unlikely]] {
       THROW_ERR_OUT_OF_RANGE(env, "keyData is too big");
@@ -443,6 +974,9 @@ KeyObjectData KeyObjectData::GetPublicOrPrivateKeyFromJs(
              .To(&config)) {
       return {};
     }
+
+    // Skip the namedCurve argument (only used by raw format imports).
+    (*offset)++;
 
     ncrypto::Buffer<const unsigned char> buffer = {
         .data = reinterpret_cast<const unsigned char*>(data.data()),
@@ -502,7 +1036,7 @@ KeyObjectData KeyObjectData::GetPublicOrPrivateKeyFromJs(
       BaseObject::Unwrap<KeyObjectHandle>(args[*offset].As<Object>());
   CHECK_NOT_NULL(key);
   CHECK_NE(key->Data().GetKeyType(), kKeyTypeSecret);
-  (*offset) += 4;
+  (*offset) += 5;
   return key->Data().addRef();
 }
 
@@ -533,35 +1067,27 @@ KeyObjectData::KeyObjectData(std::nullptr_t)
 
 KeyObjectData::KeyObjectData(ByteSource symmetric_key)
     : key_type_(KeyType::kKeyTypeSecret),
+      mutex_(std::make_shared<Mutex>()),
       data_(std::make_shared<Data>(std::move(symmetric_key))) {}
 
 KeyObjectData::KeyObjectData(KeyType type, EVPKeyPointer&& pkey)
-    : key_type_(type), data_(std::make_shared<Data>(std::move(pkey))) {}
+    : key_type_(type),
+      mutex_(std::make_shared<Mutex>()),
+      data_(std::make_shared<Data>(std::move(pkey))) {}
+
+void KeyObjectData::Data::MemoryInfo(MemoryTracker* tracker) const {
+  if (asymmetric_key) {
+    tracker->TrackFieldWithSize("key",
+                                kSizeOf_EVP_PKEY +
+                                    asymmetric_key.rawPublicKeySize() +
+                                    asymmetric_key.rawPrivateKeySize());
+  } else {
+    tracker->TraitTrackInline(symmetric_key, "symmetric_key");
+  }
+}
 
 void KeyObjectData::MemoryInfo(MemoryTracker* tracker) const {
-  if (!*this) return;
-  switch (GetKeyType()) {
-    case kKeyTypeSecret: {
-      if (data_->symmetric_key) {
-        tracker->TrackFieldWithSize("symmetric_key",
-                                    data_->symmetric_key.size());
-      }
-      break;
-    }
-    case kKeyTypePrivate:
-      // Fall through
-    case kKeyTypePublic: {
-      if (data_->asymmetric_key) {
-        tracker->TrackFieldWithSize(
-            "key",
-            kSizeOf_EVP_PKEY + data_->asymmetric_key.rawPublicKeySize() +
-                data_->asymmetric_key.rawPrivateKeySize());
-      }
-      break;
-    }
-    default:
-      UNREACHABLE();
-  }
+  tracker->TrackField("data", data_);
 }
 
 Mutex& KeyObjectData::mutex() const {
@@ -616,6 +1142,7 @@ Local<Function> KeyObjectHandle::Initialize(Environment* env) {
         KeyObjectHandle::kInternalFieldCount);
 
     SetProtoMethod(isolate, templ, "init", Init);
+    SetProtoMethodNoSideEffect(isolate, templ, "getKeyType", GetKeyType);
     SetProtoMethodNoSideEffect(
         isolate, templ, "getSymmetricKeySize", GetSymmetricKeySize);
     SetProtoMethodNoSideEffect(
@@ -624,14 +1151,13 @@ Local<Function> KeyObjectHandle::Initialize(Environment* env) {
         isolate, templ, "checkEcKeyData", CheckEcKeyData);
     SetProtoMethod(isolate, templ, "export", Export);
     SetProtoMethod(isolate, templ, "exportJwk", ExportJWK);
-    SetProtoMethod(isolate, templ, "initECRaw", InitECRaw);
-    SetProtoMethod(isolate, templ, "initEDRaw", InitEDRaw);
-#if OPENSSL_WITH_PQC
-    SetProtoMethod(isolate, templ, "initPqcRaw", InitPqcRaw);
     SetProtoMethodNoSideEffect(isolate, templ, "rawPublicKey", RawPublicKey);
+    SetProtoMethodNoSideEffect(isolate, templ, "rawPrivateKey", RawPrivateKey);
     SetProtoMethodNoSideEffect(isolate, templ, "rawSeed", RawSeed);
-#endif
-    SetProtoMethod(isolate, templ, "initJwk", InitJWK);
+    SetProtoMethodNoSideEffect(
+        isolate, templ, "exportECPublicRaw", ExportECPublicRaw);
+    SetProtoMethodNoSideEffect(
+        isolate, templ, "exportECPrivateRaw", ExportECPrivateRaw);
     SetProtoMethod(isolate, templ, "keyDetail", GetKeyDetail);
     SetProtoMethod(isolate, templ, "equals", Equals);
 
@@ -644,19 +1170,17 @@ void KeyObjectHandle::RegisterExternalReferences(
     ExternalReferenceRegistry* registry) {
   registry->Register(New);
   registry->Register(Init);
+  registry->Register(GetKeyType);
   registry->Register(GetSymmetricKeySize);
   registry->Register(GetAsymmetricKeyType);
   registry->Register(CheckEcKeyData);
   registry->Register(Export);
   registry->Register(ExportJWK);
-  registry->Register(InitECRaw);
-  registry->Register(InitEDRaw);
-#if OPENSSL_WITH_PQC
-  registry->Register(InitPqcRaw);
   registry->Register(RawPublicKey);
+  registry->Register(RawPrivateKey);
   registry->Register(RawSeed);
-#endif
-  registry->Register(InitJWK);
+  registry->Register(ExportECPublicRaw);
+  registry->Register(ExportECPrivateRaw);
   registry->Register(GetKeyDetail);
   registry->Register(Equals);
 }
@@ -697,6 +1221,7 @@ void KeyObjectHandle::Init(const FunctionCallbackInfo<Value>& args) {
   ASSIGN_OR_RETURN_UNWRAP(&key, args.This());
   MarkPopErrorOnReturn mark_pop_error_on_return;
 
+  Environment* env = Environment::GetCurrent(args);
   CHECK(args[0]->IsInt32());
   KeyType type = static_cast<KeyType>(args[0].As<Uint32>()->Value());
 
@@ -704,25 +1229,70 @@ void KeyObjectHandle::Init(const FunctionCallbackInfo<Value>& args) {
 
   switch (type) {
   case kKeyTypeSecret: {
+    if (args.Length() == 5 && args[2]->IsInt32()) {
+      auto format = static_cast<EVPKeyPointer::PKFormatType>(
+          args[2].As<Int32>()->Value());
+      if (format == EVPKeyPointer::PKFormatType::JWK) {
+        CHECK(args[1]->IsObject());
+        key->data_ = ImportJWKSecretKey(env, args[1].As<Object>());
+        break;
+      }
+    }
     CHECK_EQ(args.Length(), 2);
     ArrayBufferOrViewContents<char> buf(args[1]);
     key->data_ = KeyObjectData::CreateSecret(buf.ToCopy());
     break;
   }
-  case kKeyTypePublic: {
-    CHECK_EQ(args.Length(), 5);
+  case kKeyTypePublic:
+  case kKeyTypePrivate: {
+    CHECK_EQ(args.Length(), 6);
+
+    // Check if this is a raw or JWK format import:
+    // args: [keyType, buffer/object, formatInt, typeString/null,
+    //        passphrase/null, namedCurve/null]
+    if (args[2]->IsInt32()) {
+      auto format = static_cast<EVPKeyPointer::PKFormatType>(
+          args[2].As<Int32>()->Value());
+      if (format == EVPKeyPointer::PKFormatType::RAW_PUBLIC ||
+          format == EVPKeyPointer::PKFormatType::RAW_PRIVATE ||
+          format == EVPKeyPointer::PKFormatType::RAW_SEED) {
+        auto data = ImportRawKeyFromArgs(args, 1);
+        if (!data) return;
+        if (type == kKeyTypePublic && data.GetKeyType() == kKeyTypePrivate) {
+          key->data_ = data.addRefWithType(kKeyTypePublic);
+        } else {
+          key->data_ = std::move(data);
+        }
+        break;
+      }
+      if (format == EVPKeyPointer::PKFormatType::JWK) {
+        CHECK(args[1]->IsObject());
+        key->data_ = ImportJWKFromArgs(env, args[1].As<Object>());
+        if (!key->data_) return;
+        if (type == kKeyTypePublic &&
+            key->data_.GetKeyType() == kKeyTypePrivate) {
+          key->data_ = key->data_.addRefWithType(kKeyTypePublic);
+        } else if (type == kKeyTypePrivate &&
+                   key->data_.GetKeyType() == kKeyTypePublic) {
+          THROW_ERR_CRYPTO_INVALID_JWK(
+              env, "JWK does not contain private key material");
+          return;
+        }
+        args.GetReturnValue().Set(key->data_.GetKeyType());
+        break;
+      }
+    }
 
     offset = 1;
-    auto data = KeyObjectData::GetPublicOrPrivateKeyFromJs(args, &offset);
-    if (!data) return;
-    key->data_ = data.addRefWithType(kKeyTypePublic);
-    break;
-  }
-  case kKeyTypePrivate: {
-    CHECK_EQ(args.Length(), 5);
-    offset = 1;
-    if (auto data = KeyObjectData::GetPrivateKeyFromJs(args, &offset, false)) {
-      key->data_ = std::move(data);
+    if (type == kKeyTypePublic) {
+      auto data = KeyObjectData::GetPublicOrPrivateKeyFromJs(args, &offset);
+      if (!data) return;
+      key->data_ = data.addRefWithType(kKeyTypePublic);
+    } else {
+      if (auto data =
+              KeyObjectData::GetPrivateKeyFromJs(args, &offset, false)) {
+        key->data_ = std::move(data);
+      }
     }
     break;
   }
@@ -731,168 +1301,13 @@ void KeyObjectHandle::Init(const FunctionCallbackInfo<Value>& args) {
   }
 }
 
-void KeyObjectHandle::InitJWK(const FunctionCallbackInfo<Value>& args) {
-  Environment* env = Environment::GetCurrent(args);
-  KeyObjectHandle* key;
-  ASSIGN_OR_RETURN_UNWRAP(&key, args.This());
-  MarkPopErrorOnReturn mark_pop_error_on_return;
-
-  // The argument must be a JavaScript object that we will inspect
-  // to get the JWK properties from.
-  CHECK(args[0]->IsObject());
-
-  // Step one, Secret key or not?
-  Local<Object> input = args[0].As<Object>();
-
-  Local<Value> kty;
-  if (!input->Get(env->context(), env->jwk_kty_string()).ToLocal(&kty) ||
-      !kty->IsString()) {
-    return THROW_ERR_CRYPTO_INVALID_JWK(env);
-  }
-
-  Utf8Value kty_string(env->isolate(), kty);
-
-  if (kty_string == "oct") {
-    // Secret key
-    key->data_ = ImportJWKSecretKey(env, input);
-    if (!key->data_) {
-      // ImportJWKSecretKey is responsible for throwing an appropriate error
-      return;
-    }
-  } else {
-    key->data_ = ImportJWKAsymmetricKey(env, input, *kty_string, args, 1);
-    if (!key->data_) {
-      // ImportJWKAsymmetricKey is responsible for throwing an appropriate error
-      return;
-    }
-  }
-
-  args.GetReturnValue().Set(key->data_.GetKeyType());
-}
-
-void KeyObjectHandle::InitECRaw(const FunctionCallbackInfo<Value>& args) {
-  Environment* env = Environment::GetCurrent(args);
+void KeyObjectHandle::GetKeyType(const FunctionCallbackInfo<Value>& args) {
   KeyObjectHandle* key;
   ASSIGN_OR_RETURN_UNWRAP(&key, args.This());
 
-  CHECK(args[0]->IsString());
-  Utf8Value name(env->isolate(), args[0]);
-
-  MarkPopErrorOnReturn mark_pop_error_on_return;
-
-  int id = OBJ_txt2nid(*name);
-  auto eckey = ECKeyPointer::NewByCurveName(id);
-  if (!eckey)
-    return args.GetReturnValue().Set(false);
-
-  const auto group = eckey.getGroup();
-  auto pub = ECDH::BufferToPoint(env, group, args[1]);
-
-  if (!pub || !eckey || !eckey.setPublicKey(pub)) {
-    return args.GetReturnValue().Set(false);
-  }
-
-  auto pkey = EVPKeyPointer::New();
-  if (!pkey.assign(eckey)) {
-    args.GetReturnValue().Set(false);
-  }
-
-  eckey.release();  // Release ownership of the key
-
-  key->data_ = KeyObjectData::CreateAsymmetric(kKeyTypePublic, std::move(pkey));
-
-  args.GetReturnValue().Set(true);
+  args.GetReturnValue().Set(
+      Uint32::NewFromUnsigned(args.GetIsolate(), key->Data().GetKeyType()));
 }
-
-void KeyObjectHandle::InitEDRaw(const FunctionCallbackInfo<Value>& args) {
-  KeyObjectHandle* key;
-  ASSIGN_OR_RETURN_UNWRAP(&key, args.This());
-
-  CHECK(args[0]->IsString());
-  Utf8Value name(args.GetIsolate(), args[0]);
-
-  ArrayBufferOrViewContents<unsigned char> key_data(args[1]);
-  KeyType type = FromV8Value<KeyType>(args[2]);
-
-  MarkPopErrorOnReturn mark_pop_error_on_return;
-
-  typedef EVPKeyPointer (*new_key_fn)(
-      int, const ncrypto::Buffer<const unsigned char>&);
-  new_key_fn fn = type == kKeyTypePrivate ? EVPKeyPointer::NewRawPrivate
-                                          : EVPKeyPointer::NewRawPublic;
-
-  int id = GetNidFromName(*name);
-
-  switch (id) {
-    case EVP_PKEY_X25519:
-    case EVP_PKEY_X448:
-    case EVP_PKEY_ED25519:
-    case EVP_PKEY_ED448: {
-      auto pkey = fn(id,
-                     ncrypto::Buffer<const unsigned char>{
-                         .data = key_data.data(),
-                         .len = key_data.size(),
-                     });
-      if (!pkey) {
-        return args.GetReturnValue().Set(false);
-      }
-      key->data_ = KeyObjectData::CreateAsymmetric(type, std::move(pkey));
-      CHECK(key->data_);
-      break;
-    }
-    default:
-      UNREACHABLE();
-  }
-
-  args.GetReturnValue().Set(true);
-}
-
-#if OPENSSL_WITH_PQC
-void KeyObjectHandle::InitPqcRaw(const FunctionCallbackInfo<Value>& args) {
-  KeyObjectHandle* key;
-  ASSIGN_OR_RETURN_UNWRAP(&key, args.This());
-
-  CHECK(args[0]->IsString());
-  Utf8Value name(args.GetIsolate(), args[0]);
-
-  ArrayBufferOrViewContents<unsigned char> key_data(args[1]);
-  KeyType type = FromV8Value<KeyType>(args[2]);
-
-  MarkPopErrorOnReturn mark_pop_error_on_return;
-
-  typedef EVPKeyPointer (*new_key_fn)(
-      int, const ncrypto::Buffer<const unsigned char>&);
-  new_key_fn fn = type == kKeyTypePrivate ? EVPKeyPointer::NewRawSeed
-                                          : EVPKeyPointer::NewRawPublic;
-
-  int id = GetNidFromName(*name);
-
-  switch (id) {
-    case EVP_PKEY_ML_DSA_44:
-    case EVP_PKEY_ML_DSA_65:
-    case EVP_PKEY_ML_DSA_87:
-    case EVP_PKEY_ML_KEM_512:
-    case EVP_PKEY_ML_KEM_768:
-    case EVP_PKEY_ML_KEM_1024: {
-      auto pkey = fn(id,
-                     ncrypto::Buffer<const unsigned char>{
-                         .data = key_data.data(),
-                         .len = key_data.size(),
-                     });
-      if (!pkey) {
-        return args.GetReturnValue().Set(false);
-      }
-      key->data_ = KeyObjectData::CreateAsymmetric(type, std::move(pkey));
-      CHECK(key->data_);
-      break;
-    }
-    default:
-      UNREACHABLE();
-  }
-
-  args.GetReturnValue().Set(true);
-}
-#endif
 
 void KeyObjectHandle::Equals(const FunctionCallbackInfo<Value>& args) {
   KeyObjectHandle* self_handle;
@@ -983,45 +1398,12 @@ Local<Value> KeyObjectHandle::GetAsymmetricKeyType() const {
     case EVP_PKEY_X448:
       return env()->crypto_x448_string();
 #if OPENSSL_WITH_PQC
-    case EVP_PKEY_ML_DSA_44:
-      return env()->crypto_ml_dsa_44_string();
-    case EVP_PKEY_ML_DSA_65:
-      return env()->crypto_ml_dsa_65_string();
-    case EVP_PKEY_ML_DSA_87:
-      return env()->crypto_ml_dsa_87_string();
-    case EVP_PKEY_ML_KEM_512:
-      return env()->crypto_ml_kem_512_string();
-    case EVP_PKEY_ML_KEM_768:
-      return env()->crypto_ml_kem_768_string();
-    case EVP_PKEY_ML_KEM_1024:
-      return env()->crypto_ml_kem_1024_string();
-    case EVP_PKEY_SLH_DSA_SHA2_128F:
-      return env()->crypto_slh_dsa_sha2_128f_string();
-    case EVP_PKEY_SLH_DSA_SHA2_128S:
-      return env()->crypto_slh_dsa_sha2_128s_string();
-    case EVP_PKEY_SLH_DSA_SHA2_192F:
-      return env()->crypto_slh_dsa_sha2_192f_string();
-    case EVP_PKEY_SLH_DSA_SHA2_192S:
-      return env()->crypto_slh_dsa_sha2_192s_string();
-    case EVP_PKEY_SLH_DSA_SHA2_256F:
-      return env()->crypto_slh_dsa_sha2_256f_string();
-    case EVP_PKEY_SLH_DSA_SHA2_256S:
-      return env()->crypto_slh_dsa_sha2_256s_string();
-    case EVP_PKEY_SLH_DSA_SHAKE_128F:
-      return env()->crypto_slh_dsa_shake_128f_string();
-    case EVP_PKEY_SLH_DSA_SHAKE_128S:
-      return env()->crypto_slh_dsa_shake_128s_string();
-    case EVP_PKEY_SLH_DSA_SHAKE_192F:
-      return env()->crypto_slh_dsa_shake_192f_string();
-    case EVP_PKEY_SLH_DSA_SHAKE_192S:
-      return env()->crypto_slh_dsa_shake_192s_string();
-    case EVP_PKEY_SLH_DSA_SHAKE_256F:
-      return env()->crypto_slh_dsa_shake_256f_string();
-    case EVP_PKEY_SLH_DSA_SHAKE_256S:
-      return env()->crypto_slh_dsa_shake_256s_string();
-#endif
+    default:
+      return GetPqcAsymmetricKeyType(env(), data_.GetAsymmetricKey().id());
+#else
     default:
       return Undefined(env()->isolate());
+#endif
   }
 }
 
@@ -1118,7 +1500,6 @@ MaybeLocal<Value> KeyObjectHandle::ExportPrivateKey(
   return WritePrivateKey(env(), data_.GetAsymmetricKey(), config);
 }
 
-#if OPENSSL_WITH_PQC
 void KeyObjectHandle::RawPublicKey(
     const v8::FunctionCallbackInfo<v8::Value>& args) {
   Environment* env = Environment::GetCurrent(args);
@@ -1129,16 +1510,137 @@ void KeyObjectHandle::RawPublicKey(
   CHECK_NE(data.GetKeyType(), kKeyTypeSecret);
 
   Mutex::ScopedLock lock(data.mutex());
-  auto raw_data = data.GetAsymmetricKey().rawPublicKey();
+  const auto& pkey = data.GetAsymmetricKey();
+
+  const int id = pkey.id();
+  bool is_raw_supported = id == EVP_PKEY_ED25519 || id == EVP_PKEY_ED448 ||
+                          id == EVP_PKEY_X25519 || id == EVP_PKEY_X448;
+#if OPENSSL_WITH_PQC
+  is_raw_supported = is_raw_supported || IsPqcKeyId(id);
+#endif
+  if (!is_raw_supported) {
+    return THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+  }
+
+  auto raw_data = pkey.rawPublicKey();
   if (!raw_data) {
     return THROW_ERR_CRYPTO_OPERATION_FAILED(env,
                                              "Failed to get raw public key");
   }
 
   args.GetReturnValue().Set(
-      Buffer::Copy(
-          env, reinterpret_cast<const char*>(raw_data.get()), raw_data.size())
+      Buffer::Copy(env, raw_data.get<const char>(), raw_data.size())
           .FromMaybe(Local<Value>()));
+}
+
+void KeyObjectHandle::RawPrivateKey(
+    const v8::FunctionCallbackInfo<v8::Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  KeyObjectHandle* key;
+  ASSIGN_OR_RETURN_UNWRAP(&key, args.This());
+
+  const KeyObjectData& data = key->Data();
+  CHECK_EQ(data.GetKeyType(), kKeyTypePrivate);
+
+  Mutex::ScopedLock lock(data.mutex());
+  const auto& pkey = data.GetAsymmetricKey();
+
+  const int id = pkey.id();
+  bool is_raw_supported = id == EVP_PKEY_ED25519 || id == EVP_PKEY_ED448 ||
+                          id == EVP_PKEY_X25519 || id == EVP_PKEY_X448;
+#if OPENSSL_WITH_PQC
+  is_raw_supported = is_raw_supported || IsPqcRawPrivateKeyId(id);
+#endif
+  if (!is_raw_supported) {
+    return THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+  }
+
+  auto raw_data = pkey.rawPrivateKey();
+  if (!raw_data) {
+    return THROW_ERR_CRYPTO_OPERATION_FAILED(env,
+                                             "Failed to get raw private key");
+  }
+
+  args.GetReturnValue().Set(
+      Buffer::Copy(env, raw_data.get<const char>(), raw_data.size())
+          .FromMaybe(Local<Value>()));
+}
+
+void KeyObjectHandle::ExportECPublicRaw(
+    const v8::FunctionCallbackInfo<v8::Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  KeyObjectHandle* key;
+  ASSIGN_OR_RETURN_UNWRAP(&key, args.This());
+
+  const KeyObjectData& data = key->Data();
+  CHECK_NE(data.GetKeyType(), kKeyTypeSecret);
+
+  Mutex::ScopedLock lock(data.mutex());
+  const auto& m_pkey = data.GetAsymmetricKey();
+  if (m_pkey.id() != EVP_PKEY_EC) {
+    return THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+  }
+
+  ECKeyPointer ec_key(m_pkey);
+  if (!ec_key) return THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+  // A provider-backed key need not expose its public point.
+  if (ec_key.getPublicKey() == nullptr) {
+    return THROW_ERR_CRYPTO_OPERATION_FAILED(env,
+                                             "Failed to export EC public key");
+  }
+
+  CHECK(args[0]->IsInt32());
+  auto form =
+      static_cast<point_conversion_form_t>(args[0].As<Int32>()->Value());
+
+  const auto group = ec_key.getGroup();
+  const auto point = ec_key.getPublicKey();
+
+  Local<Object> buf;
+  if (!ECPointToBuffer(env, group, point, form).ToLocal(&buf)) return;
+
+  args.GetReturnValue().Set(buf);
+}
+
+void KeyObjectHandle::ExportECPrivateRaw(
+    const v8::FunctionCallbackInfo<v8::Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  KeyObjectHandle* key;
+  ASSIGN_OR_RETURN_UNWRAP(&key, args.This());
+
+  const KeyObjectData& data = key->Data();
+  CHECK_EQ(data.GetKeyType(), kKeyTypePrivate);
+
+  Mutex::ScopedLock lock(data.mutex());
+  const auto& m_pkey = data.GetAsymmetricKey();
+  if (m_pkey.id() != EVP_PKEY_EC) {
+    return THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+  }
+
+  ECKeyPointer ec_key(m_pkey);
+  if (!ec_key) return THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+
+  const BIGNUM* private_key = ec_key.getPrivateKey();
+  if (private_key == nullptr) {
+    return THROW_ERR_CRYPTO_OPERATION_FAILED(env,
+                                             "Failed to export EC private key");
+  }
+
+  const auto group = ec_key.getGroup();
+  auto order = BignumPointer::New();
+  if (!order || !EC_GROUP_get_order(group, order.get(), nullptr)) {
+    return THROW_ERR_CRYPTO_OPERATION_FAILED(env,
+                                             "Failed to export EC private key");
+  }
+
+  auto buf = BignumPointer::EncodePadded(private_key, order.byteLength());
+  if (!buf) {
+    return THROW_ERR_CRYPTO_OPERATION_FAILED(env,
+                                             "Failed to export EC private key");
+  }
+
+  args.GetReturnValue().Set(Buffer::Copy(env, buf.get<const char>(), buf.size())
+                                .FromMaybe(Local<Value>()));
 }
 
 void KeyObjectHandle::RawSeed(const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -1149,18 +1651,26 @@ void KeyObjectHandle::RawSeed(const v8::FunctionCallbackInfo<v8::Value>& args) {
   const KeyObjectData& data = key->Data();
   CHECK_EQ(data.GetKeyType(), kKeyTypePrivate);
 
+#if OPENSSL_WITH_PQC
   Mutex::ScopedLock lock(data.mutex());
-  auto raw_data = data.GetAsymmetricKey().rawSeed();
+  const auto& pkey = data.GetAsymmetricKey();
+
+  if (!IsPqcSeedKeyId(pkey.id())) {
+    return THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
+  }
+
+  auto raw_data = pkey.rawSeed();
   if (!raw_data) {
     return THROW_ERR_CRYPTO_OPERATION_FAILED(env, "Failed to get raw seed");
   }
 
   args.GetReturnValue().Set(
-      Buffer::Copy(
-          env, reinterpret_cast<const char*>(raw_data.get()), raw_data.size())
+      Buffer::Copy(env, raw_data.get<const char>(), raw_data.size())
           .FromMaybe(Local<Value>()));
-}
+#else
+  return THROW_ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS(env);
 #endif
+}
 
 void KeyObjectHandle::ExportJWK(
     const v8::FunctionCallbackInfo<v8::Value>& args) {
@@ -1173,6 +1683,8 @@ void KeyObjectHandle::ExportJWK(
 
   if (ExportJWKInner(env, key->Data(), args[0], args[1]->IsTrue())) {
     args.GetReturnValue().Set(args[0]);
+  } else if (!env->isolate()->HasPendingException()) {
+    THROW_ERR_CRYPTO_OPERATION_FAILED(env, "Failed to export JWK");
   }
 }
 
@@ -1181,18 +1693,35 @@ void NativeKeyObject::Initialize(Environment* env, Local<Object> target) {
             target,
             "createNativeKeyObjectClass",
             NativeKeyObject::CreateNativeKeyObjectClass);
+  SetMethod(
+      env->context(), target, "getKeyObjectSlots", NativeKeyObject::GetSlots);
+  SetMethodNoSideEffect(
+      env->context(), target, "isKeyObject", NativeKeyObject::IsKeyObject);
 }
 
 void NativeKeyObject::RegisterExternalReferences(
     ExternalReferenceRegistry* registry) {
   registry->Register(NativeKeyObject::CreateNativeKeyObjectClass);
+  registry->Register(NativeKeyObject::GetSlots);
+  registry->Register(NativeKeyObject::IsKeyObject);
   registry->Register(NativeKeyObject::New);
+}
+
+bool NativeKeyObject::HasInstance(Environment* env, Local<Value> value) {
+  auto t = env->crypto_key_object_constructor_template();
+  return !t.IsEmpty() && t->HasInstance(value);
+}
+
+void NativeKeyObject::IsKeyObject(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  CHECK_EQ(args.Length(), 1);
+  args.GetReturnValue().Set(HasInstance(env, args[0]));
 }
 
 void NativeKeyObject::New(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   CHECK_EQ(args.Length(), 1);
-  CHECK(args[0]->IsObject());
+  CHECK(KeyObjectHandle::HasInstance(env, args[0]));
   KeyObjectHandle* handle = Unwrap<KeyObjectHandle>(args[0].As<Object>());
   CHECK_NOT_NULL(handle);
   new NativeKeyObject(env, args.This(), handle->Data());
@@ -1210,7 +1739,9 @@ void NativeKeyObject::CreateNativeKeyObjectClass(
   Local<FunctionTemplate> t =
       NewFunctionTemplate(isolate, NativeKeyObject::New);
   t->InstanceTemplate()->SetInternalFieldCount(
-      KeyObjectHandle::kInternalFieldCount);
+      NativeKeyObject::kInternalFieldCount);
+  CHECK(env->crypto_key_object_constructor_template().IsEmpty());
+  env->set_crypto_key_object_constructor_template(t);
 
   Local<Value> ctor;
   if (!t->GetFunction(env->context()).ToLocal(&ctor))
@@ -1232,6 +1763,34 @@ void NativeKeyObject::CreateNativeKeyObjectClass(
   args.GetReturnValue().Set(ret);
 }
 
+// Returns the key's native hidden slot tuple as a single Array:
+// [type enum, handle]. JS-side helpers call this once per key to prime
+// a per-instance cache; derived metadata is appended lazily from JS by
+// calling methods on the returned KeyObjectHandle.
+void NativeKeyObject::GetSlots(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  CHECK_EQ(args.Length(), 1);
+  if (!HasInstance(env, args[0])) {
+    THROW_ERR_INVALID_THIS(env, "Value of \"this\" must be of type KeyObject");
+    return;
+  }
+
+  NativeKeyObject* native = Unwrap<NativeKeyObject>(args[0].As<Object>());
+  CHECK_NOT_NULL(native);
+
+  Local<Object> handle;
+  if (!KeyObjectHandle::Create(env, native->handle_data_).ToLocal(&handle)) {
+    return;
+  }
+
+  Isolate* isolate = env->isolate();
+  Local<Value> slots[] = {
+      Uint32::NewFromUnsigned(isolate, native->handle_data_.GetKeyType()),
+      handle,
+  };
+  args.GetReturnValue().Set(Array::New(isolate, slots, arraysize(slots)));
+}
+
 BaseObjectPtr<BaseObject> NativeKeyObject::KeyObjectTransferData::Deserialize(
         Environment* env,
         Local<Context> context,
@@ -1246,8 +1805,7 @@ BaseObjectPtr<BaseObject> NativeKeyObject::KeyObjectTransferData::Deserialize(
     return {};
 
   Local<Function> key_ctor;
-  Local<Value> arg = FIXED_ONE_BYTE_STRING(env->isolate(),
-                                           "internal/crypto/keys");
+  Local<Value> arg = env->internal_crypto_keys_string();
   if (env->builtin_module_require()
           ->Call(context, Null(env->isolate()), 1, &arg)
           .IsEmpty()) {
@@ -1271,7 +1829,7 @@ BaseObjectPtr<BaseObject> NativeKeyObject::KeyObjectTransferData::Deserialize(
   if (!key_ctor->NewInstance(context, 1, &handle).ToLocal(&key))
     return {};
 
-  return BaseObjectPtr<BaseObject>(Unwrap<KeyObjectHandle>(key.As<Object>()));
+  return BaseObjectPtr<BaseObject>(Unwrap<NativeKeyObject>(key.As<Object>()));
 }
 
 BaseObject::TransferMode NativeKeyObject::GetTransferMode() const {
@@ -1283,30 +1841,384 @@ std::unique_ptr<worker::TransferData> NativeKeyObject::CloneForMessaging()
   return std::make_unique<KeyObjectTransferData>(handle_data_);
 }
 
-WebCryptoKeyExportStatus PKEY_SPKI_Export(const KeyObjectData& key_data,
-                                          ByteSource* out) {
-  CHECK_EQ(key_data.GetKeyType(), kKeyTypePublic);
-  Mutex::ScopedLock lock(key_data.mutex());
-  auto bio = key_data.GetAsymmetricKey().derPublicKey();
-  if (!bio) return WebCryptoKeyExportStatus::FAILED;
-  *out = ByteSource::FromBIO(bio);
-  return WebCryptoKeyExportStatus::OK;
+void NativeCryptoKey::Initialize(Environment* env, Local<Object> target) {
+  SetMethod(env->context(),
+            target,
+            "createCryptoKeyClass",
+            NativeCryptoKey::CreateCryptoKeyClass);
+  SetMethod(
+      env->context(), target, "getCryptoKeySlots", NativeCryptoKey::GetSlots);
+  SetMethodNoSideEffect(
+      env->context(), target, "isCryptoKey", NativeCryptoKey::IsCryptoKey);
 }
 
-WebCryptoKeyExportStatus PKEY_PKCS8_Export(const KeyObjectData& key_data,
-                                           ByteSource* out) {
-  CHECK_EQ(key_data.GetKeyType(), kKeyTypePrivate);
-  Mutex::ScopedLock lock(key_data.mutex());
-  const auto& m_pkey = key_data.GetAsymmetricKey();
+void NativeCryptoKey::RegisterExternalReferences(
+    ExternalReferenceRegistry* registry) {
+  registry->Register(NativeCryptoKey::CreateCryptoKeyClass);
+  registry->Register(NativeCryptoKey::GetSlots);
+  registry->Register(NativeCryptoKey::IsCryptoKey);
+  registry->Register(NativeCryptoKey::New);
+}
 
-  auto bio = BIOPointer::NewMem();
-  CHECK(bio);
-  PKCS8Pointer p8inf(EVP_PKEY2PKCS8(m_pkey.get()));
-  if (!i2d_PKCS8_PRIV_KEY_INFO_bio(bio.get(), p8inf.get()))
-    return WebCryptoKeyExportStatus::FAILED;
+namespace {
+// Verifies that `value` is a `NativeCryptoKey` by checking whether it
+// was constructed from the Environment's `NativeCryptoKey` template.
+bool IsNativeCryptoKey(Environment* env, Local<Value> value) {
+  auto t = env->crypto_cryptokey_constructor_template();
+  return !t.IsEmpty() && t->HasInstance(value);
+}
+}  // namespace
 
-  *out = ByteSource::FromBIO(bio);
-  return WebCryptoKeyExportStatus::OK;
+bool NativeCryptoKey::HasInstance(Environment* env, Local<Value> value) {
+  return IsNativeCryptoKey(env, value);
+}
+
+void NativeCryptoKey::IsCryptoKey(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  CHECK_EQ(args.Length(), 1);
+  args.GetReturnValue().Set(HasInstance(env, args[0]));
+}
+
+MaybeLocal<Value> NativeCryptoKey::Create(Environment* env,
+                                          const KeyObjectData& data,
+                                          Local<Value> algorithm,
+                                          uint32_t usages_mask,
+                                          bool extractable) {
+  Local<Context> context = env->context();
+  Isolate* isolate = env->isolate();
+  CHECK(algorithm->IsObject());
+
+  Local<Object> handle;
+  if (!KeyObjectHandle::Create(env, data).ToLocal(&handle)) return {};
+
+  if (env->crypto_internal_cryptokey_constructor().IsEmpty()) {
+    Local<Value> arg = env->internal_crypto_keys_string();
+    if (env->builtin_module_require()
+            ->Call(context, Null(isolate), 1, &arg)
+            .IsEmpty()) {
+      return {};
+    }
+  }
+
+  Local<Function> cryptokey_ctor = env->crypto_internal_cryptokey_constructor();
+  CHECK(!cryptokey_ctor.IsEmpty());
+  Local<Value> ctor_args[] = {
+      handle,
+      algorithm,
+      Uint32::NewFromUnsigned(isolate, usages_mask),
+      Boolean::New(isolate, extractable),
+  };
+  return cryptokey_ctor->NewInstance(context, arraysize(ctor_args), ctor_args);
+}
+
+void NativeCryptoKey::New(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  CHECK_GE(args.Length(), 4);
+  CHECK_LE(args.Length(), 6);
+  // args[0] is a KeyObjectHandle; we keep its KeyObjectData directly.
+  // args[1] is the algorithm dictionary object.
+  // args[2] is the usages mask.
+  // args[3] is the extractable boolean.
+  // args[4], when present, is an optional secondary KeyObjectHandle for
+  // Hybrid KEM CryptoKeys.
+  // args[5], when present, is optional seed_data for Hybrid KEM CryptoKeys.
+  //
+  // args[1] is undefined only when called from
+  // CryptoKeyTransferData::Deserialize for a partially-initialized
+  // CryptoKey: algorithm/usages mask/extractable get filled in afterwards
+  // by FinalizeTransferRead before any JS can see the object.
+  //
+  // This constructor is not exposed to user JS - the public CryptoKey
+  // class throws from its constructor and InternalCryptoKey is kept
+  // in a module-closure.
+  CHECK(KeyObjectHandle::HasInstance(env, args[0]));
+  KeyObjectHandle* handle = Unwrap<KeyObjectHandle>(args[0].As<Object>());
+  CHECK_NOT_NULL(handle);
+
+  KeyObjectData secondary_data;
+  if (args.Length() >= 5 && !args[4]->IsUndefined()) {
+    CHECK(KeyObjectHandle::HasInstance(env, args[4]));
+    KeyObjectHandle* secondary_handle =
+        Unwrap<KeyObjectHandle>(args[4].As<Object>());
+    CHECK_NOT_NULL(secondary_handle);
+    secondary_data = secondary_handle->Data();
+  }
+
+  ByteSource seed_data;
+  if (args.Length() == 6 && !args[5]->IsUndefined()) {
+    CHECK(IsAnyBufferSource(args[5]));
+    ArrayBufferOrViewContents<char> buf(args[5]);
+    seed_data = buf.ToCopy();
+  }
+
+  auto* native = new NativeCryptoKey(
+      env, args.This(), handle->Data(), secondary_data, std::move(seed_data));
+
+  if (!args[1]->IsUndefined()) {
+    CHECK(args[1]->IsObject());
+    CHECK(args[2]->IsUint32());
+    CHECK(args[3]->IsBoolean());
+    args.This()->SetInternalField(kAlgorithmField, args[1]);
+    native->usages_mask_ = args[2].As<Uint32>()->Value();
+    native->extractable_ = args[3]->IsTrue();
+  }
+}
+
+void NativeCryptoKey::CreateCryptoKeyClass(
+    const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  Isolate* isolate = env->isolate();
+
+  CHECK_EQ(args.Length(), 1);
+  Local<Value> callback = args[0];
+  CHECK(callback->IsFunction());
+
+  Local<FunctionTemplate> t =
+      NewFunctionTemplate(isolate, NativeCryptoKey::New);
+  t->InstanceTemplate()->SetInternalFieldCount(
+      NativeCryptoKey::kInternalFieldCount);
+  CHECK(env->crypto_cryptokey_constructor_template().IsEmpty());
+  env->set_crypto_cryptokey_constructor_template(t);
+
+  Local<Value> ctor;
+  if (!t->GetFunction(env->context()).ToLocal(&ctor)) return;
+
+  Local<Value> recv = Undefined(env->isolate());
+  Local<Value> ret_v;
+  if (!callback.As<Function>()
+           ->Call(env->context(), recv, 1, &ctor)
+           .ToLocal(&ret_v)) {
+    return;
+  }
+  Local<Array> ret = ret_v.As<Array>();
+  Local<Value> internal_ctor_v;
+  if (!ret->Get(env->context(), 1).ToLocal(&internal_ctor_v)) return;
+  CHECK(env->crypto_internal_cryptokey_constructor().IsEmpty());
+  env->set_crypto_internal_cryptokey_constructor(
+      internal_ctor_v.As<Function>());
+  args.GetReturnValue().Set(ret);
+}
+
+// Returns all of the key's internal slot values as a single Array:
+// [type enum, extractable, algorithm, usages mask, handle, secondary handle,
+// seed data]. JS-side helpers call this once per key to prime a per-instance
+// cache, so subsequent reads don't need to cross into C++ at all. The
+// secondary handle and seed data slots are only used by Hybrid KEM CryptoKeys.
+void NativeCryptoKey::GetSlots(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  CHECK_EQ(args.Length(), 1);
+  if (!HasInstance(env, args[0])) {
+    THROW_ERR_INVALID_THIS(env, "Value of \"this\" must be of type CryptoKey");
+    return;
+  }
+  Local<Object> obj = args[0].As<Object>();
+  NativeCryptoKey* native = Unwrap<NativeCryptoKey>(obj);
+  CHECK_NOT_NULL(native);
+
+  Local<Object> handle;
+  if (!KeyObjectHandle::Create(env, native->handle_data_).ToLocal(&handle)) {
+    return;
+  }
+
+  Isolate* isolate = env->isolate();
+  Local<Value> secondary_handle = Undefined(isolate);
+  if (native->secondary_handle_data_) {
+    Local<Object> secondary_handle_object;
+    if (!KeyObjectHandle::Create(env, native->secondary_handle_data_)
+             .ToLocal(&secondary_handle_object)) {
+      return;
+    }
+    secondary_handle = secondary_handle_object;
+  }
+
+  Local<Value> seed_data = Undefined(isolate);
+  if (native->seed_data_) {
+    Local<Object> buf;
+    if (!Buffer::Copy(
+             env, native->seed_data_.data<char>(), native->seed_data_.size())
+             .ToLocal(&buf)) {
+      return;
+    }
+    seed_data = buf;
+  }
+
+  Local<Value> algorithm = obj->GetInternalField(kAlgorithmField).As<Value>();
+  CHECK(algorithm->IsObject());
+  Local<Value> slots[] = {
+      Uint32::NewFromUnsigned(isolate, native->handle_data_.GetKeyType()),
+      v8::Boolean::New(isolate, native->extractable_),
+      algorithm,
+      Uint32::NewFromUnsigned(isolate, native->usages_mask_),
+      handle,
+      secondary_handle,
+      seed_data,
+  };
+  args.GetReturnValue().Set(Array::New(isolate, slots, arraysize(slots)));
+}
+
+BaseObject::TransferMode NativeCryptoKey::GetTransferMode() const {
+  return BaseObject::TransferMode::kCloneable;
+}
+
+std::unique_ptr<worker::TransferData> NativeCryptoKey::CloneForMessaging()
+    const {
+  Isolate* isolate = env()->isolate();
+  Local<Object> obj = object();
+  Local<Value> algorithm_v = obj->GetInternalField(kAlgorithmField).As<Value>();
+  CHECK(algorithm_v->IsObject());
+  v8::Global<Object> algorithm_copy(isolate, algorithm_v.As<Object>());
+  return std::make_unique<CryptoKeyTransferData>(handle_data_,
+                                                 secondary_handle_data_,
+                                                 seed_data_.ToCopy(),
+                                                 std::move(algorithm_copy),
+                                                 usages_mask_,
+                                                 extractable_);
+}
+
+Maybe<void> NativeCryptoKey::FinalizeTransferRead(
+    Local<Context> context, v8::ValueDeserializer* deserializer) {
+  Local<Value> bundle_v;
+  if (!deserializer->ReadValue(context).ToLocal(&bundle_v)) {
+    return Nothing<void>();
+  }
+  CHECK(bundle_v->IsObject());
+  Local<Object> bundle = bundle_v.As<Object>();
+  Local<Object> obj = object();
+
+  // The partially-initialized object produced by
+  // CryptoKeyTransferData::Deserialize should not have algorithm set yet.
+  CHECK(obj->GetInternalField(kAlgorithmField).As<Value>()->IsUndefined());
+
+  Local<Value> algorithm_v;
+  if (!bundle->Get(context, env()->algorithm_string()).ToLocal(&algorithm_v)) {
+    return Nothing<void>();
+  }
+  CHECK(algorithm_v->IsObject());
+  obj->SetInternalField(kAlgorithmField, algorithm_v);
+
+  Local<Value> usages_v;
+  if (!bundle->Get(context, env()->usages_string()).ToLocal(&usages_v)) {
+    return Nothing<void>();
+  }
+  CHECK(usages_v->IsUint32());
+  usages_mask_ = usages_v.As<Uint32>()->Value();
+
+  Local<Value> extractable_v;
+  if (!bundle->Get(context, env()->extractable_string())
+           .ToLocal(&extractable_v)) {
+    return Nothing<void>();
+  }
+  CHECK(extractable_v->IsBoolean());
+  extractable_ = extractable_v->IsTrue();
+
+  return v8::JustVoid();
+}
+
+Maybe<bool> NativeCryptoKey::CryptoKeyTransferData::FinalizeTransferWrite(
+    Local<Context> context, v8::ValueSerializer* serializer) {
+  Isolate* isolate = Isolate::GetCurrent();
+  Environment* env = Environment::GetCurrent(isolate);
+  CHECK(!algorithm_.IsEmpty());
+  Local<Object> bundle = Object::New(isolate);
+  Local<Value> algorithm_v = PersistentToLocal::Strong(algorithm_);
+  if (bundle->Set(context, env->algorithm_string(), algorithm_v).IsNothing() ||
+      bundle
+          ->Set(context,
+                env->usages_string(),
+                Uint32::NewFromUnsigned(isolate, usages_mask_))
+          .IsNothing() ||
+      bundle
+          ->Set(context,
+                env->extractable_string(),
+                v8::Boolean::New(isolate, extractable_))
+          .IsNothing()) {
+    return Nothing<bool>();
+  }
+  auto ret = serializer->WriteValue(context, bundle);
+  algorithm_.Reset();
+  return ret;
+}
+
+BaseObjectPtr<BaseObject> NativeCryptoKey::CryptoKeyTransferData::Deserialize(
+    Environment* env,
+    Local<Context> context,
+    std::unique_ptr<worker::TransferData> self) {
+  if (context != env->context()) {
+    THROW_ERR_MESSAGE_TARGET_CONTEXT_UNAVAILABLE(env);
+    return {};
+  }
+
+  // Reconstruct the KeyObjectHandle for the transferred KeyObjectData.
+  Local<Object> handle;
+  if (!KeyObjectHandle::Create(env, data_).ToLocal(&handle)) return {};
+
+  Isolate* isolate = env->isolate();
+  Local<Value> secondary_handle = Undefined(isolate);
+  if (secondary_data_) {
+    Local<Object> secondary_handle_object;
+    if (!KeyObjectHandle::Create(env, secondary_data_)
+             .ToLocal(&secondary_handle_object)) {
+      return {};
+    }
+    secondary_handle = secondary_handle_object;
+  }
+
+  Local<Value> seed_data = Undefined(isolate);
+  if (seed_data_) {
+    Local<Object> buf;
+    if (!Buffer::Copy(env, seed_data_.data<char>(), seed_data_.size())
+             .ToLocal(&buf)) {
+      return {};
+    }
+    seed_data = buf;
+  }
+
+  // Make sure internal/crypto/keys has been loaded so that the
+  // CryptoKey constructor is registered with the Environment.
+  Local<Value> arg = env->internal_crypto_keys_string();
+  if (env->builtin_module_require()
+          ->Call(context, Null(isolate), 1, &arg)
+          .IsEmpty()) {
+    return {};
+  }
+
+  // Construct a partially-initialized InternalCryptoKey; algorithm,
+  // usages mask and extractable are filled in via FinalizeTransferRead.
+  Local<Function> cryptokey_ctor = env->crypto_internal_cryptokey_constructor();
+  CHECK(!cryptokey_ctor.IsEmpty());
+  Local<Value> ctor_args[] = {
+      handle,
+      Undefined(isolate),
+      Undefined(isolate),
+      Undefined(isolate),
+      secondary_handle,
+      seed_data,
+  };
+  Local<Value> cryptokey;
+  if (!cryptokey_ctor->NewInstance(context, 6, ctor_args).ToLocal(&cryptokey)) {
+    return {};
+  }
+
+  return BaseObjectPtr<BaseObject>(
+      Unwrap<NativeCryptoKey>(cryptokey.As<Object>()));
+}
+
+void NativeCryptoKey::MemoryInfo(MemoryTracker* tracker) const {
+  tracker->TrackField("handle_data", handle_data_);
+  if (secondary_handle_data_) {
+    tracker->TrackField("secondary_handle_data", secondary_handle_data_);
+  }
+  tracker->TrackFieldWithSize("seed_data", seed_data_.size());
+}
+
+void NativeCryptoKey::CryptoKeyTransferData::MemoryInfo(
+    MemoryTracker* tracker) const {
+  tracker->TrackField("data", data_);
+  if (secondary_data_) {
+    tracker->TrackField("secondary_data", secondary_data_);
+  }
+  tracker->TrackFieldWithSize("seed_data", seed_data_.size());
+  tracker->TrackField("algorithm", algorithm_);
 }
 
 namespace Keys {
@@ -1329,6 +2241,14 @@ void Initialize(Environment* env, Local<Object> target) {
       static_cast<int>(EVPKeyPointer::PKFormatType::PEM);
   constexpr int kKeyFormatJWK =
       static_cast<int>(EVPKeyPointer::PKFormatType::JWK);
+  constexpr int kKeyFormatRawPublic =
+      static_cast<int>(EVPKeyPointer::PKFormatType::RAW_PUBLIC);
+  constexpr int kKeyFormatRawPrivate =
+      static_cast<int>(EVPKeyPointer::PKFormatType::RAW_PRIVATE);
+  constexpr int kKeyFormatRawSeed =
+      static_cast<int>(EVPKeyPointer::PKFormatType::RAW_SEED);
+  constexpr int kKeyFormatStore =
+      static_cast<int>(EVPKeyPointer::PKFormatType::STORE);
 
   constexpr auto kSigEncDER = DSASigEnc::DER;
   constexpr auto kSigEncP1363 = DSASigEnc::P1363;
@@ -1343,9 +2263,12 @@ void Initialize(Environment* env, Local<Object> target) {
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_ML_DSA_44);
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_ML_DSA_65);
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_ML_DSA_87);
+#if OPENSSL_WITH_PQC_ML_KEM_512
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_ML_KEM_512);
+#endif
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_ML_KEM_768);
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_ML_KEM_1024);
+#if OPENSSL_WITH_PQC_SLH_DSA
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_SLH_DSA_SHA2_128F);
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_SLH_DSA_SHA2_128S);
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_SLH_DSA_SHA2_192F);
@@ -1359,6 +2282,7 @@ void Initialize(Environment* env, Local<Object> target) {
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_SLH_DSA_SHAKE_256F);
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_SLH_DSA_SHAKE_256S);
 #endif
+#endif
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_X25519);
   NODE_DEFINE_CONSTANT(target, EVP_PKEY_X448);
   NODE_DEFINE_CONSTANT(target, kKeyEncodingPKCS1);
@@ -1368,6 +2292,10 @@ void Initialize(Environment* env, Local<Object> target) {
   NODE_DEFINE_CONSTANT(target, kKeyFormatDER);
   NODE_DEFINE_CONSTANT(target, kKeyFormatPEM);
   NODE_DEFINE_CONSTANT(target, kKeyFormatJWK);
+  NODE_DEFINE_CONSTANT(target, kKeyFormatRawPublic);
+  NODE_DEFINE_CONSTANT(target, kKeyFormatRawPrivate);
+  NODE_DEFINE_CONSTANT(target, kKeyFormatRawSeed);
+  NODE_DEFINE_CONSTANT(target, kKeyFormatStore);
   NODE_DEFINE_CONSTANT(target, kKeyTypeSecret);
   NODE_DEFINE_CONSTANT(target, kKeyTypePublic);
   NODE_DEFINE_CONSTANT(target, kKeyTypePrivate);

@@ -163,6 +163,86 @@ t.test('audit fix - bulk endpoint', async t => {
   )
 })
 
+t.test('audit fix exits non-zero when min-release-age blocks a fix', async t => {
+  const { npm, logs } = await loadMockNpm(t, {
+    prefixDir: tree,
+    config: { 'min-release-age': 30 },
+  })
+  const registry = new MockRegistry({
+    tap: t,
+    registry: npm.config.get('registry'),
+  })
+  const manifest = registry.manifest({
+    name: 'test-dep-a',
+    packuments: [{ version: '1.0.0' }, { version: '1.0.1' }],
+  })
+  // 1.0.0 is old enough to install; the fix 1.0.1 was published too recently.
+  manifest.time['1.0.0'] = '2020-01-01T00:00:00.000Z'
+  manifest.time['1.0.1'] = new Date().toISOString()
+  await registry.package({
+    manifest,
+    tarballs: {
+      '1.0.0': path.join(npm.prefix, 'test-dep-a-vuln'),
+    },
+    times: 2,
+  })
+  const advisory = registry.advisory({ id: 100, vulnerable_versions: '<1.0.1' })
+  registry.nock.post('/-/npm/v1/security/advisories/bulk', body => {
+    const unzipped = JSON.parse(gunzip(Buffer.from(body, 'hex')))
+    return t.same(unzipped, { 'test-dep-a': ['1.0.0'] })
+  })
+    .reply(200, { 'test-dep-a': [advisory] })
+    .post('/-/npm/v1/security/advisories/bulk', body => {
+      const unzipped = JSON.parse(gunzip(Buffer.from(body, 'hex')))
+      return t.same(unzipped, { 'test-dep-a': ['1.0.0'] })
+    })
+    .reply(200, { 'test-dep-a': [advisory] })
+
+  await npm.exec('audit', ['fix'])
+
+  t.equal(process.exitCode, 1, 'exits non-zero because the fix was blocked')
+  t.ok(
+    logs.warn.some(w =>
+      /left at a vulnerable version because a fix is newer than the release-age cutoff/.test(w)),
+    'warns that the fix was blocked by min-release-age'
+  )
+  const lock = JSON.parse(fs.readFileSync(path.join(npm.prefix, 'package-lock.json'), 'utf8'))
+  t.equal(lock.packages['node_modules/test-dep-a'].version, '1.0.0',
+    'test-dep-a was left at the vulnerable version')
+})
+
+t.test('json audit reports fixBlockedByReleaseAge when a fix is too new', async t => {
+  const { npm, joinedOutput } = await loadMockNpm(t, {
+    prefixDir: tree,
+    config: {
+      json: true,
+      'min-release-age': 30,
+    },
+  })
+  const registry = new MockRegistry({
+    tap: t,
+    registry: npm.config.get('registry'),
+  })
+  const manifest = registry.manifest({
+    name: 'test-dep-a',
+    packuments: [{ version: '1.0.0' }, { version: '1.0.1' }],
+  })
+  manifest.time['1.0.0'] = '2020-01-01T00:00:00.000Z'
+  manifest.time['1.0.1'] = new Date().toISOString()
+  await registry.package({ manifest })
+  const advisory = registry.advisory({ id: 100, vulnerable_versions: '<1.0.1' })
+  const bulkBody = gzip(JSON.stringify({ 'test-dep-a': ['1.0.0'] }))
+  registry.nock.post('/-/npm/v1/security/advisories/bulk', bulkBody)
+    .reply(200, {
+      'test-dep-a': [advisory],
+    })
+
+  await npm.exec('audit', [])
+  const report = JSON.parse(joinedOutput())
+  t.match(report.vulnerabilities['test-dep-a'].fixBlockedByReleaseAge, { version: '1.0.1' },
+    'json output flags the fix that min-release-age blocked')
+})
+
 t.test('audit fix no package lock', async t => {
   const { npm } = await loadMockNpm(t, {
     config: {
@@ -904,6 +984,26 @@ t.test('audit signatures', async t => {
     t.notOk(process.exitCode, 'should exit successfully')
     t.match(joinedOutput(), /audited 1 package/)
     t.matchSnapshot(joinedOutput())
+  })
+
+  t.test('with min-release-age set verifies installed versions', async t => {
+    const { npm, joinedOutput } = await loadMockNpm(t, {
+      prefixDir: installWithValidSigs,
+      config: {
+        'min-release-age': 99999,
+      },
+    })
+    const registry = new MockRegistry({ tap: t, registry: npm.config.get('registry') })
+    await manifestWithValidSigs({ registry })
+    mockTUF({ npm, target: TUF_VALID_KEYS_TARGET })
+
+    // min-release-age flattens into a `before` cutoff that previously leaked
+    // into the exact-version manifest lookup, producing a spurious ETARGET on
+    // already-installed versions. See npm/cli#9277.
+    await npm.exec('audit', ['signatures'])
+
+    t.notOk(process.exitCode, 'should exit successfully')
+    t.match(joinedOutput(), /audited 1 package/)
   })
 
   t.test('with valid signatures using alias', async t => {
@@ -1850,7 +1950,138 @@ t.test('audit signatures', async t => {
 
     t.notOk(process.exitCode, 'should exit successfully')
     t.match(joinedOutput(), /1 package has a verified attestation/)
+    t.match(joinedOutput(), /use --json --include-attestations to view attestation details/)
     t.matchSnapshot(joinedOutput())
+  })
+
+  t.test('with valid attestations and --include-attestations (human-readable)', async t => {
+    const { npm, joinedOutput } = await loadMockNpm(t, {
+      prefixDir: installWithValidAttestations,
+      config: {
+        'include-attestations': true,
+      },
+      mocks: {
+        pacote: t.mock('pacote', {
+          sigstore: { verify: async () => true },
+        }),
+      },
+    })
+    const registry = new MockRegistry({ tap: t, registry: npm.config.get('registry') })
+    await manifestWithValidAttestations({ registry })
+    const fixture = fs.readFileSync(
+      path.resolve(__dirname, '../../fixtures/sigstore/valid-sigstore-attestations.json'),
+      'utf8'
+    )
+    registry.nock.get('/-/npm/v1/attestations/sigstore@1.0.0').reply(200, fixture)
+    mockTUF({ npm, target: TUF_VALID_KEYS_TARGET })
+
+    await npm.exec('audit', ['signatures'])
+
+    t.notOk(process.exitCode, 'should exit successfully')
+    t.match(joinedOutput(), /1 package has a verified attestation/)
+    t.notMatch(joinedOutput(), /use --json --include-attestations to view attestation details/)
+  })
+
+  t.test('with valid attestations --json --include-attestations', async t => {
+    const { npm, joinedOutput } = await loadMockNpm(t, {
+      prefixDir: installWithValidAttestations,
+      config: {
+        json: true,
+        'include-attestations': true,
+      },
+      mocks: {
+        pacote: t.mock('pacote', {
+          sigstore: { verify: async () => true },
+        }),
+      },
+    })
+    const registry = new MockRegistry({ tap: t, registry: npm.config.get('registry') })
+    await manifestWithValidAttestations({ registry })
+    const fixture = fs.readFileSync(
+      path.resolve(__dirname, '../../fixtures/sigstore/valid-sigstore-attestations.json'),
+      'utf8'
+    )
+    registry.nock.get('/-/npm/v1/attestations/sigstore@1.0.0').reply(200, fixture)
+    mockTUF({ npm, target: TUF_VALID_KEYS_TARGET })
+
+    await npm.exec('audit', ['signatures'])
+
+    t.notOk(process.exitCode, 'should exit successfully')
+    const jsonOutput = JSON.parse(joinedOutput())
+    t.ok(jsonOutput.verified, 'should include verified array')
+    t.equal(jsonOutput.verified.length, 1, 'should have one verified package')
+    t.equal(jsonOutput.verified[0].name, 'sigstore', 'should have correct package name')
+    t.equal(jsonOutput.verified[0].version, '1.0.0', 'should have correct version')
+    t.ok(jsonOutput.verified[0].attestations, 'should include attestations')
+  })
+
+  t.test('with valid attestations --json without --include-attestations', async t => {
+    const { npm, joinedOutput } = await loadMockNpm(t, {
+      prefixDir: installWithValidAttestations,
+      config: {
+        json: true,
+      },
+      mocks: {
+        pacote: t.mock('pacote', {
+          sigstore: { verify: async () => true },
+        }),
+      },
+    })
+    const registry = new MockRegistry({ tap: t, registry: npm.config.get('registry') })
+    await manifestWithValidAttestations({ registry })
+    const fixture = fs.readFileSync(
+      path.resolve(__dirname, '../../fixtures/sigstore/valid-sigstore-attestations.json'),
+      'utf8'
+    )
+    registry.nock.get('/-/npm/v1/attestations/sigstore@1.0.0').reply(200, fixture)
+    mockTUF({ npm, target: TUF_VALID_KEYS_TARGET })
+
+    await npm.exec('audit', ['signatures'])
+
+    t.notOk(process.exitCode, 'should exit successfully')
+    const jsonOutput = JSON.parse(joinedOutput())
+    t.notOk(jsonOutput.verified, 'should not include verified array')
+  })
+
+  t.test('with keyless attestations and no registry keys', async t => {
+    const { npm, joinedOutput } = await loadMockNpm(t, {
+      prefixDir: installWithValidAttestations,
+      mocks: {
+        pacote: t.mock('pacote', {
+          sigstore: { verify: async () => true },
+        }),
+      },
+    })
+    const registry = new MockRegistry({ tap: t, registry: npm.config.get('registry') })
+    const manifest = registry.manifest({
+      name: 'sigstore',
+      packuments: [{
+        version: '1.0.0',
+        dist: {
+          integrity: 'sha512-e+qfbn/zf1+rCza/BhIA//Awmf0v1pa5HQS8Xk8iXrn9bgytytVLqYD' +
+                     '0P7NSqZ6IELTgq+tcDvLPkQjNHyWLNg==',
+          tarball: 'https://registry.npmjs.org/sigstore/-/sigstore-1.0.0.tgz',
+          attestations: {
+            url: 'https://registry.npmjs.org/-/npm/v1/attestations/sigstore@1.0.0',
+            provenance: { predicateType: 'https://slsa.dev/provenance/v0.2' },
+          },
+        },
+      }],
+    })
+    await registry.package({ manifest })
+    const fixture = fs.readFileSync(
+      path.resolve(__dirname, '../../fixtures/sigstore/keyless-sigstore-attestations.json'),
+      'utf8'
+    )
+    registry.nock.get('/-/npm/v1/attestations/sigstore@1.0.0').reply(200, JSON.parse(fixture))
+    // TUF returns no keys and the keys endpoint returns 404
+    mockTUF({ npm, target: TUF_TARGET_NOT_FOUND })
+    registry.nock.get('/-/npm/v1/keys').reply(404)
+
+    await npm.exec('audit', ['signatures'])
+
+    t.notOk(process.exitCode, 'should exit successfully')
+    t.match(joinedOutput(), /1 package has a verified attestation/)
   })
 
   t.test('with multiple valid attestations', async t => {
@@ -2106,4 +2337,32 @@ t.test('audit signatures', async t => {
       )
     })
   })
+})
+
+t.test('audit fix threads allowScripts policy through to arborist', async t => {
+  let capturedOpts
+  const FakeArborist = function (opts) {
+    capturedOpts = opts
+    this.options = opts
+    this.actualTree = { inventory: new Map() }
+    this.auditReport = {}
+  }
+  FakeArborist.prototype.audit = async () => {}
+
+  const { npm } = await loadMockNpm(t, {
+    prefixDir: {
+      'package.json': JSON.stringify({
+        name: 'host',
+        version: '1.0.0',
+        allowScripts: { canvas: true },
+      }),
+    },
+    mocks: {
+      '@npmcli/arborist': FakeArborist,
+      '{LIB}/utils/reify-finish.js': async () => {},
+    },
+  })
+  await npm.exec('audit', ['fix'])
+  t.strictSame(capturedOpts.allowScripts, { canvas: true },
+    'opts.allowScripts populated from package.json')
 })

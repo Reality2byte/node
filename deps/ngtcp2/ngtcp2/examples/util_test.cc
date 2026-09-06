@@ -26,6 +26,9 @@
 
 #include <limits>
 #include <array>
+#include <iterator>
+#include <expected>
+#include <filesystem>
 
 #include "util.h"
 
@@ -47,6 +50,8 @@ const MunitTest tests[]{
   munit_void_test(test_util_format_hex),
   munit_void_test(test_util_decode_hex),
   munit_void_test(test_util_is_hex_string),
+  munit_void_test(test_util_split_str),
+  munit_void_test(test_util_format_app_error_code),
   munit_test_end(),
 };
 } // namespace
@@ -57,29 +62,33 @@ const MunitSuite util_suite{
 };
 
 namespace util {
-std::optional<HPKEPrivateKey>
-read_hpke_private_key_pem(const std::string_view &filename) {
-  return {};
+std::expected<HPKEPrivateKey, Error>
+read_hpke_private_key_pem(const std::filesystem::path &path) {
+  return std::unexpected{Error::NOT_IMPLEMENTED};
 }
 } // namespace util
 
 namespace util {
-std::optional<std::vector<uint8_t>> read_pem(const std::string_view &filename,
-                                             const std::string_view &name,
-                                             const std::string_view &type) {
-  return {};
+std::expected<std::vector<uint8_t>, Error>
+read_pem(const std::filesystem::path &path, std::string_view name,
+         std::string_view type) {
+  return std::unexpected{Error::NOT_IMPLEMENTED};
 }
 } // namespace util
 
 namespace util {
-int write_pem(const std::string_view &filename, const std::string_view &name,
-              const std::string_view &type, std::span<const uint8_t> data) {
-  return -1;
+std::expected<void, Error> write_pem(const std::filesystem::path &path,
+                                     std::string_view name,
+                                     std::string_view type,
+                                     std::span<const uint8_t> data) {
+  return std::unexpected{Error::NOT_IMPLEMENTED};
 }
 } // namespace util
 
 namespace util {
-int generate_secure_random(std::span<uint8_t> data) { return -1; }
+std::expected<void, Error> generate_secure_random(std::span<uint8_t> data) {
+  return std::unexpected{Error::NOT_IMPLEMENTED};
+}
 } // namespace util
 
 void test_util_format_durationf() {
@@ -92,26 +101,26 @@ void test_util_format_durationf() {
   assert_stdstring_equal("2.00us", util::format_durationf(1999));
   assert_stdstring_equal("1.00ms", util::format_durationf(999999));
   assert_stdstring_equal("3.50ms", util::format_durationf(3500111));
-  assert_stdstring_equal("9999.99s", util::format_durationf(9999990000000llu));
+  assert_stdstring_equal("9999.99s", util::format_durationf(9999990000000ULL));
 }
 
 void test_util_format_uint() {
-  assert_stdstring_equal("0"s, util::format_uint(0u));
+  assert_stdstring_equal("0"s, util::format_uint(0U));
   assert_stdstring_equal("18446744073709551615"s,
-                         util::format_uint(18446744073709551615ull));
+                         util::format_uint(18446744073709551615ULL));
 }
 
 void test_util_format_uint_iec() {
-  assert_stdstring_equal("0"s, util::format_uint_iec(0u));
-  assert_stdstring_equal("1023"s, util::format_uint_iec((1u << 10) - 1));
-  assert_stdstring_equal("1K"s, util::format_uint_iec(1u << 10));
-  assert_stdstring_equal("1M"s, util::format_uint_iec(1u << 20));
-  assert_stdstring_equal("1G"s, util::format_uint_iec(1u << 30));
+  assert_stdstring_equal("0"s, util::format_uint_iec(0U));
+  assert_stdstring_equal("1023"s, util::format_uint_iec((1U << 10) - 1));
+  assert_stdstring_equal("1K"s, util::format_uint_iec(1U << 10));
+  assert_stdstring_equal("1M"s, util::format_uint_iec(1U << 20));
+  assert_stdstring_equal("1G"s, util::format_uint_iec(1U << 30));
   assert_stdstring_equal(
     "18446744073709551615"s,
     util::format_uint_iec(std::numeric_limits<uint64_t>::max()));
   assert_stdstring_equal("1025K"s,
-                         util::format_uint_iec((1u << 20) + (1u << 10)));
+                         util::format_uint_iec((1U << 20) + (1U << 10)));
 }
 
 void test_util_format_duration() {
@@ -120,12 +129,12 @@ void test_util_format_duration() {
   assert_stdstring_equal("1us", util::format_duration(1000));
   assert_stdstring_equal("1ms", util::format_duration(1000000));
   assert_stdstring_equal("1s", util::format_duration(1000000000));
-  assert_stdstring_equal("1m", util::format_duration(60000000000ull));
-  assert_stdstring_equal("1h", util::format_duration(3600000000000ull));
+  assert_stdstring_equal("1m", util::format_duration(60000000000ULL));
+  assert_stdstring_equal("1h", util::format_duration(3600000000000ULL));
   assert_stdstring_equal(
     "18446744073709551615ns",
     util::format_duration(std::numeric_limits<uint64_t>::max()));
-  assert_stdstring_equal("61s", util::format_duration(61000000000ull));
+  assert_stdstring_equal("61s", util::format_duration(61000000000ULL));
 }
 
 void test_util_parse_uint() {
@@ -142,7 +151,7 @@ void test_util_parse_uint() {
   {
     auto res = util::parse_uint("18446744073709551615");
     assert_true(res.has_value());
-    assert_uint64(18446744073709551615ull, ==, *res);
+    assert_uint64(18446744073709551615ULL, ==, *res);
   }
   {
     auto res = util::parse_uint("18446744073709551616");
@@ -154,6 +163,10 @@ void test_util_parse_uint() {
   }
   {
     auto res = util::parse_uint("1a");
+    assert_false(res.has_value());
+  }
+  {
+    auto res = util::parse_uint("");
     assert_false(res.has_value());
   }
 }
@@ -187,7 +200,7 @@ void test_util_parse_uint_iec() {
   {
     auto res = util::parse_uint_iec("11G");
     assert_true(res.has_value());
-    assert_uint64((1ull << 30) * 11, ==, *res);
+    assert_uint64((1ULL << 30) * 11, ==, *res);
   }
   {
     auto res = util::parse_uint_iec("18446744073709551616");
@@ -199,6 +212,14 @@ void test_util_parse_uint_iec() {
   }
   {
     auto res = util::parse_uint_iec("1Gx");
+    assert_false(res.has_value());
+  }
+  {
+    auto res = util::parse_uint_iec("G");
+    assert_false(res.has_value());
+  }
+  {
+    auto res = util::parse_uint_iec("");
     assert_false(res.has_value());
   }
 }
@@ -270,22 +291,124 @@ void test_util_parse_duration() {
     auto res = util::parse_duration("1mxy");
     assert_false(res.has_value());
   }
+  {
+    auto res = util::parse_duration("s");
+    assert_false(res.has_value());
+  }
+  {
+    auto res = util::parse_duration("ms");
+    assert_false(res.has_value());
+  }
+  {
+    auto res = util::parse_duration("");
+    assert_false(res.has_value());
+  }
 }
 
 void test_util_normalize_path() {
-  assert_stdstring_equal("/", util::normalize_path("/"));
-  assert_stdstring_equal("/", util::normalize_path("//"));
-  assert_stdstring_equal("/foo", util::normalize_path("/foo"));
-  assert_stdstring_equal("/foo/bar/", util::normalize_path("/foo/bar/"));
-  assert_stdstring_equal("/foo/bar/", util::normalize_path("/foo/abc/../bar/"));
-  assert_stdstring_equal("/foo/bar/",
-                         util::normalize_path("/../foo/abc/../bar/"));
-  assert_stdstring_equal("/foo/bar/",
-                         util::normalize_path("/./foo/././abc///.././bar/./"));
-  assert_stdstring_equal("/foo/", util::normalize_path("/foo/."));
-  assert_stdstring_equal("/foo/bar", util::normalize_path("/foo/./bar"));
-  assert_stdstring_equal("/bar", util::normalize_path("/foo/./../bar"));
-  assert_stdstring_equal("/bar", util::normalize_path("/../../bar"));
+  {
+    auto rv = util::normalize_path("/");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("//");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("/foo");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/foo", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("/foo/bar/");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/foo/bar/", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("/foo/abc/../bar/");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/foo/bar/", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("/../foo/abc/../bar/");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/foo/bar/", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("/./foo/././abc///.././bar/./");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/foo/bar/", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("/foo/.");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/foo/", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("/foo/./bar");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/foo/bar", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("/foo/./../bar");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/bar", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("/../../bar");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/bar", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path(std::string(1024, '/'));
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path(std::string(1025, '/'));
+
+    assert_false(rv);
+  }
+
+  {
+    auto rv = util::normalize_path("/..");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/", rv.value());
+  }
+
+  {
+    auto rv = util::normalize_path("/../../index.html");
+
+    assert_true(rv.has_value());
+    assert_stdstring_equal("/index.html", rv.value());
+  }
 }
 
 void test_util_hexdump() {
@@ -349,7 +472,7 @@ void test_util_hexdump() {
     },
     {
       .title = "Non-printables",
-      .data = "\0\a\b\t\n\v\f\r\x7f"sv,
+      .data = "\0\a\b\t\n\v\f\r\x7F"sv,
       .dump = "00000000  00 07 08 09 0a 0b 0c 0d  7f                       "
               "|.........|\n"
               "00000009\n"sv,
@@ -399,9 +522,9 @@ void test_util_hexdump() {
     munit_log(MUNIT_LOG_INFO, t.title);
 
     auto f = tmpfile();
-    auto rv = util::hexdump(f, t.data.data(), t.data.size());
+    auto rv = util::hexdump(f, std::span{t.data});
 
-    assert_int(0, ==, rv);
+    assert_true(rv.has_value());
 
     fseek(f, 0, SEEK_SET);
     auto nread = fread(buf, 1, sizeof(buf), f);
@@ -414,15 +537,59 @@ void test_util_hexdump() {
 }
 
 void test_util_format_hex() {
-  auto a = std::to_array<uint8_t>({0xde, 0xad, 0xbe, 0xef});
+  auto a = std::to_array<uint8_t>({0xDE, 0xAD, 0xBE, 0xEF});
 
   assert_stdstring_equal("deadbeef"s, util::format_hex(a));
-  assert_stdstring_equal("deadbeef"s, util::format_hex(0xdeadbeef));
+  assert_stdstring_equal("deadbeef"s, util::format_hex(0xDEADBEEF));
   assert_stdstring_equal("beef"s, util::format_hex(a.data() + 2, 2));
+
+  std::array<char, 64> buf;
+
+  assert_stdsv_equal(
+    "00"sv, (std::string_view{std::ranges::begin(buf),
+                              util::format_hex(static_cast<uint8_t>(0U),
+                                               std::ranges::begin(buf))}));
+  assert_stdsv_equal(
+    "ec"sv, (std::string_view{std::ranges::begin(buf),
+                              util::format_hex(static_cast<uint8_t>(0xECU),
+                                               std::ranges::begin(buf))}));
+  assert_stdsv_equal(
+    "00000000"sv,
+    (std::string_view{std::ranges::begin(buf),
+                      util::format_hex(0U, std::ranges::begin(buf))}));
+  assert_stdsv_equal(
+    "0000ab01"sv,
+    (std::string_view{std::ranges::begin(buf),
+                      util::format_hex(0xAB01U, std::ranges::begin(buf))}));
+  assert_stdsv_equal(
+    "deadbeefbaadf00d"sv,
+    (std::string_view{
+      std::ranges::begin(buf),
+      util::format_hex(0xDEADBEEFBAADF00DU, std::ranges::begin(buf))}));
+  assert_stdsv_equal(
+    "ffffffffffffffff"sv,
+    (std::string_view{std::ranges::begin(buf),
+                      util::format_hex(std::numeric_limits<uint64_t>::max(),
+                                       std::ranges::begin(buf))}));
+
+  std::vector<char> char_vec;
+  util::format_hex(a, std::back_inserter(char_vec));
+
+  assert_stdsv_equal("deadbeef"sv,
+                     (std::string_view{std::ranges::begin(char_vec),
+                                       std::ranges::end(char_vec)}));
+
+  std::vector<uint8_t> uint8_vec;
+  util::format_hex(a, std::back_inserter(uint8_vec));
+
+  assert_stdsv_equal(
+    "deadbeef"sv,
+    (std::string_view{reinterpret_cast<const char *>(uint8_vec.data()),
+                      uint8_vec.size()}));
 }
 
 void test_util_decode_hex() {
-  assert_stdstring_equal("\xde\xad\xbe\xef"s, util::decode_hex("deadbeef"sv));
+  assert_stdstring_equal("\xDE\xAD\xBE\xEF"s, util::decode_hex("deadbeef"sv));
   assert_stdstring_equal(""s, util::decode_hex(""sv));
 }
 
@@ -437,6 +604,28 @@ void test_util_is_hex_string() {
   assert_false(util::is_hex_string("zzz"sv));
   assert_false(util::is_hex_string("zz"sv));
   assert_false(util::is_hex_string("z"sv));
+}
+
+void test_util_split_str() {
+  assert_true((std::vector{"alpha"sv, "bravo"sv, "charlie"sv} ==
+               (util::split_str("alpha,bravo,charlie"sv) |
+                std::ranges::to<std::vector>())));
+  assert_true((std::vector{"alpha"sv, "bravo"sv, "charlie"sv} ==
+               (util::split_str("alpha bravo charlie"sv, ' ') |
+                std::ranges::to<std::vector>())));
+  assert_true((std::vector<std::string_view>{} ==
+               (util::split_str(""sv, ' ') | std::ranges::to<std::vector>())));
+  assert_true((std::vector{""sv, ""sv} ==
+               (util::split_str(","sv) | std::ranges::to<std::vector>())));
+  assert_true(
+    (std::vector{""sv, "alpha"sv, ""sv, ""sv, "bravo"sv, "charlie"sv, ""sv,
+                 ""sv} == (util::split_str(" alpha   bravo charlie  "sv, ' ') |
+                           std::ranges::to<std::vector>())));
+}
+
+void test_util_format_app_error_code() {
+  assert_stdstring_equal("(no error)", util::format_app_error_code({}));
+  assert_stdstring_equal("0xfe01", util::format_app_error_code(0xfe01));
 }
 
 } // namespace ngtcp2

@@ -11,21 +11,22 @@
  */
 
 #ifndef OPENSSL_CONFIGURATION_H
-# define OPENSSL_CONFIGURATION_H
-# pragma once
+#define OPENSSL_CONFIGURATION_H
+#pragma once
 
-# ifdef  __cplusplus
+#ifdef __cplusplus
 extern "C" {
-# endif
+#endif
 
-# ifdef OPENSSL_ALGORITHM_DEFINES
-#  error OPENSSL_ALGORITHM_DEFINES no longer supported
-# endif
+#ifdef OPENSSL_ALGORITHM_DEFINES
+#error OPENSSL_ALGORITHM_DEFINES no longer supported
+#endif
 
 /*
  * OpenSSL was configured with the following options:
  */
 
+/* clang-format off */
 # define OPENSSL_CONFIGURED_API 30500
 # ifndef OPENSSL_RAND_SEED_OS
 #  define OPENSSL_RAND_SEED_OS
@@ -42,14 +43,8 @@ extern "C" {
 # ifndef OPENSSL_NO_ASM
 #  define OPENSSL_NO_ASM
 # endif
-# ifndef OPENSSL_NO_BROTLI
-#  define OPENSSL_NO_BROTLI
-# endif
 # ifndef OPENSSL_NO_BROTLI_DYNAMIC
 #  define OPENSSL_NO_BROTLI_DYNAMIC
-# endif
-# ifndef OPENSSL_NO_COMP
-#  define OPENSSL_NO_COMP
 # endif
 # ifndef OPENSSL_NO_CRYPTO_MDEBUG
 #  define OPENSSL_NO_CRYPTO_MDEBUG
@@ -120,6 +115,9 @@ extern "C" {
 # ifndef OPENSSL_NO_SSLKEYLOG
 #  define OPENSSL_NO_SSLKEYLOG
 # endif
+# ifndef OPENSSL_NO_TESTS
+#  define OPENSSL_NO_TESTS
+# endif
 # ifndef OPENSSL_NO_TFO
 #  define OPENSSL_NO_TFO
 # endif
@@ -138,14 +136,8 @@ extern "C" {
 # ifndef OPENSSL_NO_WEAK_SSL_CIPHERS
 #  define OPENSSL_NO_WEAK_SSL_CIPHERS
 # endif
-# ifndef OPENSSL_NO_ZLIB
-#  define OPENSSL_NO_ZLIB
-# endif
 # ifndef OPENSSL_NO_ZLIB_DYNAMIC
 #  define OPENSSL_NO_ZLIB_DYNAMIC
-# endif
-# ifndef OPENSSL_NO_ZSTD
-#  define OPENSSL_NO_ZSTD
 # endif
 # ifndef OPENSSL_NO_ZSTD_DYNAMIC
 #  define OPENSSL_NO_ZSTD_DYNAMIC
@@ -154,31 +146,44 @@ extern "C" {
 #  define OPENSSL_NO_DYNAMIC_ENGINE
 # endif
 
+/* clang-format on */
 
 /* Generate 80386 code? */
+/* clang-format off */
 # undef I386_ONLY
+/* clang-format on */
 
 /*
  * The following are cipher-specific, but are part of the public API.
  */
-# if !defined(OPENSSL_SYS_UEFI)
+#if !defined(OPENSSL_SYS_UEFI)
+    /* clang-format off */
 #  undef BN_LLONG
-/* Only one for the following should be defined */
+    /* clang-format on */
+    /* Only one for the following should be defined */
+    /* clang-format off */
 #  undef SIXTY_FOUR_BIT_LONG
+    /* clang-format on */
+    /* clang-format off */
 #  define SIXTY_FOUR_BIT
+    /* clang-format on */
+    /* clang-format off */
 #  undef THIRTY_TWO_BIT
-# endif
+/* clang-format on */
+#endif
 
+/* clang-format off */
 # define RC4_INT unsigned char
+/* clang-format on */
 
-# if defined(OPENSSL_NO_COMP) || (defined(OPENSSL_NO_BROTLI) && defined(OPENSSL_NO_ZSTD) && defined(OPENSSL_NO_ZLIB))
-#  define OPENSSL_NO_COMP_ALG
-# else
-#  undef  OPENSSL_NO_COMP_ALG
-# endif
+#if defined(OPENSSL_NO_COMP) || (defined(OPENSSL_NO_BROTLI) && defined(OPENSSL_NO_ZSTD) && defined(OPENSSL_NO_ZLIB))
+#define OPENSSL_NO_COMP_ALG
+#else
+#undef OPENSSL_NO_COMP_ALG
+#endif
 
-# ifdef  __cplusplus
+#ifdef __cplusplus
 }
-# endif
+#endif
 
-#endif                          /* OPENSSL_CONFIGURATION_H */
+#endif /* OPENSSL_CONFIGURATION_H */

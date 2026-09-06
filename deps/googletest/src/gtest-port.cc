@@ -89,6 +89,7 @@
 
 #include "gtest/gtest-message.h"
 #include "gtest/gtest-spi.h"
+#include "gtest/gtest.h"
 #include "gtest/internal/gtest-internal.h"
 #include "gtest/internal/gtest-string.h"
 #include "src/gtest-internal-inl.h"
@@ -302,6 +303,22 @@ bool AutoHandle::IsCloseable() const {
   return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
 }
 
+#if !GTEST_HAS_NOTIFICATION_ && defined(GTEST_OS_WINDOWS_MINGW)
+Notification::Notification() {
+  // Create a manual-reset event object.
+  event_ = ::CreateEvent(nullptr, TRUE, FALSE, nullptr);
+  GTEST_CHECK_(event_ != nullptr);
+}
+
+Notification::~Notification() { ::CloseHandle(event_); }
+
+void Notification::Notify() { GTEST_CHECK_(::SetEvent(event_)); }
+
+void Notification::WaitForNotification() {
+  GTEST_CHECK_(::WaitForSingleObject(event_, INFINITE) == WAIT_OBJECT_0);
+}
+#endif  // !GTEST_HAS_NOTIFICATION_ && defined(GTEST_OS_WINDOWS_MINGW)
+
 Mutex::Mutex()
     : owner_thread_id_(0),
       type_(kDynamic),
@@ -499,7 +516,7 @@ class ThreadLocalRegistryImpl {
     MemoryIsNotDeallocated memory_is_not_deallocated;
 #endif  // _MSC_VER
     DWORD current_thread = ::GetCurrentThreadId();
-    MutexLock lock(&mutex_);
+    MutexLock lock(mutex_);
     ThreadIdToThreadLocals* const thread_to_thread_locals =
         GetThreadLocalsMapLocked();
     ThreadIdToThreadLocals::iterator thread_local_pos =
@@ -532,7 +549,7 @@ class ThreadLocalRegistryImpl {
     // Clean up the ThreadLocalValues data structure while holding the lock, but
     // defer the destruction of the ThreadLocalValueHolderBases.
     {
-      MutexLock lock(&mutex_);
+      MutexLock lock(mutex_);
       ThreadIdToThreadLocals* const thread_to_thread_locals =
           GetThreadLocalsMapLocked();
       for (ThreadIdToThreadLocals::iterator it =
@@ -559,7 +576,7 @@ class ThreadLocalRegistryImpl {
     // Clean up the ThreadIdToThreadLocals data structure while holding the
     // lock, but defer the destruction of the ThreadLocalValueHolderBases.
     {
-      MutexLock lock(&mutex_);
+      MutexLock lock(mutex_);
       ThreadIdToThreadLocals* const thread_to_thread_locals =
           GetThreadLocalsMapLocked();
       ThreadIdToThreadLocals::iterator thread_local_pos =
@@ -729,7 +746,7 @@ void RE::Init(const char* regex) {
   char* const full_pattern = new char[full_regex_len];
 
   snprintf(full_pattern, full_regex_len, "^(%s)$", regex);
-  is_valid_ = regcomp(&full_regex_, full_pattern, reg_flags) == 0;
+  int error = regcomp(&full_regex_, full_pattern, reg_flags);
   // We want to call regcomp(&partial_regex_, ...) even if the
   // previous expression returns false.  Otherwise partial_regex_ may
   // not be properly initialized can may cause trouble when it's
@@ -738,13 +755,13 @@ void RE::Init(const char* regex) {
   // Some implementation of POSIX regex (e.g. on at least some
   // versions of Cygwin) doesn't accept the empty string as a valid
   // regex.  We change it to an equivalent form "()" to be safe.
-  if (is_valid_) {
+  if (!error) {
     const char* const partial_regex = (*regex == '\0') ? "()" : regex;
-    is_valid_ = regcomp(&partial_regex_, partial_regex, reg_flags) == 0;
+    error = regcomp(&partial_regex_, partial_regex, reg_flags);
   }
-  EXPECT_TRUE(is_valid_)
-      << "Regular expression \"" << regex
-      << "\" is not a valid POSIX Extended regular expression.";
+  is_valid_ = error == 0;
+  EXPECT_EQ(error, 0) << "Regular expression \"" << regex
+                      << "\" is not a valid POSIX Extended regular expression.";
 
   delete[] full_pattern;
 }
@@ -1052,7 +1069,7 @@ GTestLog::~GTestLog() {
 
 // Disable Microsoft deprecation warnings for POSIX functions called from
 // this class (creat, dup, dup2, and close)
-GTEST_DISABLE_MSC_DEPRECATED_PUSH_()
+GTEST_DISABLE_DEPRECATED_PUSH_()
 
 namespace {
 
@@ -1068,7 +1085,14 @@ bool EndsWithPathSeparator(const std::string& path) {
 class CapturedStream {
  public:
   // The ctor redirects the stream to a temporary file.
-  explicit CapturedStream(int fd) : fd_(fd), uncaptured_fd_(dup(fd)) {
+  explicit CapturedStream(int fd)
+      : fd_(fd),
+#ifdef GTEST_OS_WINDOWS
+        uncaptured_fd_(_dup(fd))
+#else
+        uncaptured_fd_(dup(fd))
+#endif
+  {
 #ifdef GTEST_OS_WINDOWS
     char temp_dir_path[MAX_PATH + 1] = {'\0'};   // NOLINT
     char temp_file_path[MAX_PATH + 1] = {'\0'};  // NOLINT
@@ -1078,10 +1102,12 @@ class CapturedStream {
                                             0,  // Generate unique file name.
                                             temp_file_path);
     GTEST_CHECK_(success != 0)
-        << "Unable to create a temporary file in " << temp_dir_path;
-    const int captured_fd = creat(temp_file_path, _S_IREAD | _S_IWRITE);
+        << "Failed to create temporary file in " << temp_dir_path
+        << " with error " << ::GetLastError();
+    const int captured_fd = _creat(temp_file_path, _S_IREAD | _S_IWRITE);
     GTEST_CHECK_(captured_fd != -1)
-        << "Unable to open temporary file " << temp_file_path;
+        << "Failed to open temporary file " << temp_file_path << " with error "
+        << ::GetLastError();
     filename_ = temp_file_path;
 #else
     // There's no guarantee that a test has write access to the current
@@ -1148,8 +1174,12 @@ class CapturedStream {
     filename_ = std::move(name_template);
 #endif  // GTEST_OS_WINDOWS
     fflush(nullptr);
+#ifdef GTEST_OS_WINDOWS
+    _dup2(captured_fd, fd_);
+#else
     dup2(captured_fd, fd_);
-    close(captured_fd);
+#endif
+    posix::Close(captured_fd);
   }
 
   ~CapturedStream() { remove(filename_.c_str()); }
@@ -1158,8 +1188,12 @@ class CapturedStream {
     if (uncaptured_fd_ != -1) {
       // Restores the original stream.
       fflush(nullptr);
+#ifdef GTEST_OS_WINDOWS
+      _dup2(uncaptured_fd_, fd_);
+#else
       dup2(uncaptured_fd_, fd_);
-      close(uncaptured_fd_);
+#endif
+      posix::Close(uncaptured_fd_);
       uncaptured_fd_ = -1;
     }
 
@@ -1183,7 +1217,7 @@ class CapturedStream {
   CapturedStream& operator=(const CapturedStream&) = delete;
 };
 
-GTEST_DISABLE_MSC_DEPRECATED_POP_()
+GTEST_DISABLE_DEPRECATED_POP_()
 
 static CapturedStream* g_captured_stderr = nullptr;
 static CapturedStream* g_captured_stdout = nullptr;

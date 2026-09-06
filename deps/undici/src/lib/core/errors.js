@@ -163,8 +163,8 @@ class RequestAbortedError extends AbortError {
 
 const kInformationalError = Symbol.for('undici.error.UND_ERR_INFO')
 class InformationalError extends UndiciError {
-  constructor (message) {
-    super(message)
+  constructor (message, options) {
+    super(message, options)
     this.name = 'InformationalError'
     this.message = message || 'Request information'
     this.code = 'UND_ERR_INFO'
@@ -403,6 +403,25 @@ class SecureProxyConnectionError extends UndiciError {
   }
 }
 
+const kProxyConnectionError = Symbol.for('undici.error.UND_ERR_PRX_CONN')
+class ProxyConnectionError extends UndiciError {
+  constructor (cause, message, options = {}) {
+    super(message, { cause, ...options })
+    this.name = 'ProxyConnectionError'
+    this.message = message || 'Proxy Connection failed'
+    this.code = 'UND_ERR_PRX_CONN'
+    this.cause = cause
+  }
+
+  static [Symbol.hasInstance] (instance) {
+    return instance && instance[kProxyConnectionError] === true
+  }
+
+  get [kProxyConnectionError] () {
+    return true
+  }
+}
+
 const kMaxOriginsReachedError = Symbol.for('undici.error.UND_ERR_MAX_ORIGINS_REACHED')
 class MaxOriginsReachedError extends UndiciError {
   constructor (message) {
@@ -417,6 +436,33 @@ class MaxOriginsReachedError extends UndiciError {
   }
 
   get [kMaxOriginsReachedError] () {
+    return true
+  }
+}
+
+class Socks5ProxyError extends UndiciError {
+  constructor (message, code) {
+    super(message)
+    this.name = 'Socks5ProxyError'
+    this.message = message || 'SOCKS5 proxy error'
+    this.code = code || 'UND_ERR_SOCKS5'
+  }
+}
+
+const kMessageSizeExceededError = Symbol.for('undici.error.UND_ERR_WS_MESSAGE_SIZE_EXCEEDED')
+class MessageSizeExceededError extends UndiciError {
+  constructor (message) {
+    super(message)
+    this.name = 'MessageSizeExceededError'
+    this.message = message || 'Max decompressed message size exceeded'
+    this.code = 'UND_ERR_WS_MESSAGE_SIZE_EXCEEDED'
+  }
+
+  static [Symbol.hasInstance] (instance) {
+    return instance && instance[kMessageSizeExceededError] === true
+  }
+
+  get [kMessageSizeExceededError] () {
     return true
   }
 }
@@ -444,5 +490,8 @@ module.exports = {
   RequestRetryError,
   ResponseError,
   SecureProxyConnectionError,
-  MaxOriginsReachedError
+  ProxyConnectionError,
+  MaxOriginsReachedError,
+  Socks5ProxyError,
+  MessageSizeExceededError
 }

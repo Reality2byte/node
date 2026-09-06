@@ -26,7 +26,9 @@ if (!common.hasCrypto) {
 }
 const {
   hasOpenSSL,
+  hasFIPS,
   opensslCli,
+  isBoringSSL: commonIsBoringSSL,
 } = require('../common/crypto');
 
 if (!opensslCli) {
@@ -37,6 +39,7 @@ const fixtures = require('../common/fixtures');
 const assert = require('assert');
 const tls = require('tls');
 const { spawn } = require('child_process');
+const isBoringSSL = commonIsBoringSSL;
 
 doTest({ tickets: false }, function() {
   doTest({ tickets: true }, function() {
@@ -56,7 +59,10 @@ function doTest(testOptions, callback) {
     requestCert: true,
     rejectUnauthorized: false,
     secureProtocol: 'TLS_method',
-    ciphers: 'RSA@SECLEVEL=0'
+    // BoringSSL supports the RSA cipher selector, but not OpenSSL's
+    // cipher-string policy command syntax.
+    ciphers: hasFIPS(3) ? 'ECDHE-RSA-AES256-GCM-SHA384' :
+      (isBoringSSL ? 'RSA' : 'RSA@SECLEVEL=0')
   };
   let requestCount = 0;
   let resumeCount = 0;
@@ -74,16 +80,16 @@ function doTest(testOptions, callback) {
     ++requestCount;
     cleartext.end('');
   });
-  server.on('newSession', function(id, data, cb) {
+  server.on('newSession', common.mustCallAtLeast((id, data, cb) => {
     ++newSessionCount;
     // Emulate asynchronous store
-    setImmediate(() => {
+    setImmediate(common.mustCall(() => {
       assert.ok(!session);
       session = { id, data };
       cb();
-    });
-  });
-  server.on('resumeSession', function(id, callback) {
+    }));
+  }, 0));
+  server.on('resumeSession', common.mustCallAtLeast((id, callback) => {
     ++resumeCount;
     assert.ok(session);
     assert.strictEqual(session.id.toString('hex'), id.toString('hex'));
@@ -100,13 +106,14 @@ function doTest(testOptions, callback) {
     setImmediate(() => {
       callback(null, data);
     });
-  });
+  }, 0));
 
-  server.listen(0, function() {
+  server.listen(0, common.mustCall(function() {
     const args = [
       's_client',
-      '-tls1',
-      '-cipher', (hasOpenSSL(3, 1) ? 'DEFAULT:@SECLEVEL=0' : 'DEFAULT'),
+      isBoringSSL || hasFIPS(3) ? '-tls1_2' : '-tls1',
+      '-cipher', hasFIPS(3) ? 'ECDHE-RSA-AES256-GCM-SHA384' :
+        (hasOpenSSL(3, 1) ? 'DEFAULT:@SECLEVEL=0' : 'DEFAULT'),
       '-connect', `localhost:${this.address().port}`,
       '-servername', 'ohgod',
       '-key', fixtures.path('keys/rsa_private.pem'),
@@ -143,7 +150,7 @@ function doTest(testOptions, callback) {
     }
 
     spawnClient();
-  });
+  }));
 
   process.on('exit', function() {
     // Each test run connects 6 times: an initial request and 5 reconnect

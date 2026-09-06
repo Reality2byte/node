@@ -127,8 +127,8 @@ void UDPWrapBase::set_listener(UDPListener* listener) {
 
 UDPWrapBase* UDPWrapBase::FromObject(Local<Object> obj) {
   CHECK_GT(obj->InternalFieldCount(), UDPWrapBase::kUDPWrapBaseField);
-  return static_cast<UDPWrapBase*>(
-      obj->GetAlignedPointerFromInternalField(UDPWrapBase::kUDPWrapBaseField));
+  return static_cast<UDPWrapBase*>(obj->GetAlignedPointerFromInternalField(
+      UDPWrapBase::kUDPWrapBaseField, EmbedderDataTag::kDefault));
 }
 
 void UDPWrapBase::AddMethods(Environment* env, Local<FunctionTemplate> t) {
@@ -147,8 +147,9 @@ UDPWrap::UDPWrap(Environment* env, Local<Object> object)
                  object,
                  reinterpret_cast<uv_handle_t*>(&handle_),
                  AsyncWrap::PROVIDER_UDPWRAP) {
-  object->SetAlignedPointerInInternalField(
-      UDPWrapBase::kUDPWrapBaseField, static_cast<UDPWrapBase*>(this));
+  object->SetAlignedPointerInInternalField(UDPWrapBase::kUDPWrapBaseField,
+                                           static_cast<UDPWrapBase*>(this),
+                                           EmbedderDataTag::kDefault);
 
   int r = uv_udp_init(env->event_loop(), &handle_);
   CHECK_EQ(r, 0);  // can't fail anyway
@@ -225,9 +226,7 @@ void UDPWrap::Initialize(Local<Object> target,
   env->set_udp_constructor_function(t->GetFunction(context).ToLocalChecked());
 
   // Create FunctionTemplate for SendWrap
-  Local<FunctionTemplate> swt =
-      BaseObject::MakeLazilyInitializedJSTemplate(env);
-  swt->Inherit(AsyncWrap::GetConstructorTemplate(env));
+  Local<FunctionTemplate> swt = AsyncWrap::MakeLazilyInitializedJSTemplate(env);
   SetConstructorFunction(context, target, "SendWrap", swt);
 
   Local<Object> constants = Object::New(isolate);
@@ -326,6 +325,7 @@ void UDPWrap::DoBind(const FunctionCallbackInfo<Value>& args, int family) {
     err = uv_udp_bind(&wrap->handle_,
                       reinterpret_cast<const sockaddr*>(&addr_storage),
                       flags);
+    if (err == 0) wrap->net_permission_granted_ = true;
   }
 
   if (err == 0)
@@ -359,6 +359,7 @@ void UDPWrap::DoConnect(const FunctionCallbackInfo<Value>& args, int family) {
   if (err == 0) {
     err = uv_udp_connect(&wrap->handle_,
                          reinterpret_cast<const sockaddr*>(&addr_storage));
+    if (err == 0) wrap->net_permission_granted_ = true;
   }
 
   args.GetReturnValue().Set(err);
@@ -369,9 +370,14 @@ void UDPWrap::Open(const FunctionCallbackInfo<Value>& args) {
   UDPWrap* wrap;
   ASSIGN_OR_RETURN_UNWRAP(
       &wrap, args.This(), args.GetReturnValue().Set(UV_EBADF));
+  Environment* env = wrap->env();
+
+  THROW_IF_INSUFFICIENT_PERMISSIONS(env, permission::PermissionScope::kNet, "");
+
   CHECK(args[0]->IsNumber());
   int fd = FromV8Value<int>(args[0]);
   int err = uv_udp_open(&wrap->handle_, fd);
+  if (err == 0) wrap->net_permission_granted_ = true;
 
   args.GetReturnValue().Set(err);
 }
@@ -698,6 +704,13 @@ void UDPWrapBase::RecvStart(const FunctionCallbackInfo<Value>& args) {
 
 int UDPWrap::RecvStart() {
   if (IsHandleClosing()) return UV_EBADF;
+
+  if (!net_permission_granted_) {
+    THROW_IF_INSUFFICIENT_PERMISSIONS(
+        env(), permission::PermissionScope::kNet, "", UV_EACCES);
+    net_permission_granted_ = true;
+  }
+
   int err = uv_udp_recv_start(&handle_, OnAlloc, OnRecv);
   // UV_EALREADY means that the socket is already bound but that's okay
   if (err == UV_EALREADY)

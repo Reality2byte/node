@@ -30,7 +30,7 @@ describe('Mock Timers Scheduler Test Suite', () => {
 
     const fn = t.mock.fn();
 
-    nodeTimersPromises.scheduler.wait(9999).then(fn);
+    nodeTimersPromises.scheduler.wait(9999).then(fn).then(common.mustCall());
 
     t.mock.timers.tick(8999);
     assert.strictEqual(fn.mock.callCount(), 0);
@@ -97,11 +97,9 @@ describe('Mock Timers Scheduler Test Suite', () => {
 
   it('should abort operation when .abort is called before calling setInterval', async (t) => {
     t.mock.timers.enable({ apis: ['scheduler.wait'] });
-    const controller = new AbortController();
-    controller.abort();
     const p = nodeTimersPromises.scheduler.wait(2000, {
       ref: true,
-      signal: controller.signal,
+      signal: AbortSignal.abort(),
     });
 
     await assert.rejects(() => p, {

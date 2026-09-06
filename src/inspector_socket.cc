@@ -206,6 +206,8 @@ static bool IsIPAddress(const std::string& host) {
     // (other than ::/128) that represent non-routable IPv4 addresses. However,
     // this translation assumes that the host is interpreted as an IPv6 address
     // in the first place, at which point DNS rebinding should not be an issue.
+    // False positive: https://github.com/cpplint/cpplint/issues/410
+    // NOLINTNEXTLINE(whitespace/newline)
     if (std::ranges::all_of(ipv6, [](auto b) { return b == 0; })) {
       return false;
     }
@@ -399,10 +401,11 @@ class WsHandler : public ProtocolHandler {
       if (processed > 0) {
         remove_from_beginning(data, processed);
       }
-    } while (processed > 0 && !data->empty());
+    } while (processed > 0 && !data->empty() && tcp_);
   }
 
   void Write(const std::vector<char> data) override {
+    if (!tcp_) return;
     std::vector<char> output = encode_frame_hybi17(data);
     WriteRaw(output, WriteRequest::Cleanup);
   }
@@ -664,6 +667,7 @@ ProtocolHandler::ProtocolHandler(InspectorSocket* inspector,
 
 int ProtocolHandler::WriteRaw(const std::vector<char>& buffer,
                               uv_write_cb write_cb) {
+  if (!tcp_) return -1;
   return tcp_->WriteRaw(buffer, write_cb);
 }
 

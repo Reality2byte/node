@@ -14,15 +14,6 @@
 #include "simdjson.h"
 #include "util-inl.h"
 
-// The POSTJECT_SENTINEL_FUSE macro is a string of random characters selected by
-// the Node.js project that is present only once in the entire binary. It is
-// used by the postject_has_resource() function to efficiently detect if a
-// resource has been injected. See
-// https://github.com/nodejs/postject/blob/35343439cac8c488f2596d7c4c1dddfec1fddcae/postject-api.h#L42-L45.
-#define POSTJECT_SENTINEL_FUSE "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2"
-#include "postject-api.h"
-#undef POSTJECT_SENTINEL_FUSE
-
 #include <memory>
 #include <string_view>
 #include <tuple>
@@ -33,6 +24,7 @@ using v8::Array;
 using v8::ArrayBuffer;
 using v8::BackingStore;
 using v8::Context;
+using v8::Data;
 using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::HandleScope;
@@ -40,11 +32,13 @@ using v8::Isolate;
 using v8::Local;
 using v8::LocalVector;
 using v8::MaybeLocal;
+using v8::Module;
 using v8::NewStringType;
 using v8::Object;
 using v8::ScriptCompiler;
 using v8::ScriptOrigin;
 using v8::String;
+using v8::UnboundModuleScript;
 using v8::Value;
 
 namespace node {
@@ -72,9 +66,8 @@ class SeaSerializer : public BlobSerializer<SeaSerializer> {
       : BlobSerializer<SeaSerializer>(
             per_process::enabled_debug_list.enabled(DebugCategory::SEA)) {}
 
-  template <typename T,
-            std::enable_if_t<!std::is_same<T, std::string>::value>* = nullptr,
-            std::enable_if_t<!std::is_arithmetic<T>::value>* = nullptr>
+  template <typename T>
+    requires(!std::is_arithmetic_v<T> && !std::same_as<T, std::string>)
   size_t Write(const T& data);
 };
 
@@ -93,6 +86,11 @@ size_t SeaSerializer::Write(const SeaResource& sea) {
         static_cast<uint8_t>(sea.exec_argv_extension));
   written_total +=
       WriteArithmetic<uint8_t>(static_cast<uint8_t>(sea.exec_argv_extension));
+
+  Debug("Write SEA main code format %u\n",
+        static_cast<uint8_t>(sea.main_code_format));
+  written_total +=
+      WriteArithmetic<uint8_t>(static_cast<uint8_t>(sea.main_code_format));
   DCHECK_EQ(written_total, SeaResource::kHeaderSize);
 
   Debug("Write SEA code path %p, size=%zu\n",
@@ -151,9 +149,8 @@ class SeaDeserializer : public BlobDeserializer<SeaDeserializer> {
       : BlobDeserializer<SeaDeserializer>(
             per_process::enabled_debug_list.enabled(DebugCategory::SEA), v) {}
 
-  template <typename T,
-            std::enable_if_t<!std::is_same<T, std::string>::value>* = nullptr,
-            std::enable_if_t<!std::is_arithmetic<T>::value>* = nullptr>
+  template <typename T>
+    requires(!std::is_arithmetic_v<T> && !std::same_as<T, std::string>)
   T Read();
 };
 
@@ -170,6 +167,11 @@ SeaResource SeaDeserializer::Read() {
   SeaExecArgvExtension exec_argv_extension =
       static_cast<SeaExecArgvExtension>(extension_value);
   Debug("Read SEA resource exec argv extension %u\n", extension_value);
+
+  uint8_t format_value = ReadArithmetic<uint8_t>();
+  CHECK_LE(format_value, static_cast<uint8_t>(ModuleFormat::kModule));
+  ModuleFormat main_code_format = static_cast<ModuleFormat>(format_value);
+  Debug("Read SEA main code format %u\n", format_value);
   CHECK_EQ(read_total, SeaResource::kHeaderSize);
 
   std::string_view code_path =
@@ -228,36 +230,10 @@ SeaResource SeaDeserializer::Read() {
           exec_argv_extension,
           code_path,
           code,
+          main_code_format,
           code_cache,
           assets,
           exec_argv};
-}
-
-std::string_view FindSingleExecutableBlob() {
-#if !defined(DISABLE_SINGLE_EXECUTABLE_APPLICATION)
-  CHECK(IsSingleExecutable());
-  static const std::string_view result = []() -> std::string_view {
-    size_t size;
-#ifdef __APPLE__
-    postject_options options;
-    postject_options_init(&options);
-    options.macho_segment_name = "NODE_SEA";
-    const char* blob = static_cast<const char*>(
-        postject_find_resource("NODE_SEA_BLOB", &size, &options));
-#else
-    const char* blob = static_cast<const char*>(
-        postject_find_resource("NODE_SEA_BLOB", &size, nullptr));
-#endif
-    return {blob, size};
-  }();
-  per_process::Debug(DebugCategory::SEA,
-                     "Found SEA blob %p, size=%zu\n",
-                     result.data(),
-                     result.size());
-  return result;
-#else
-  UNREACHABLE();
-#endif  // !defined(DISABLE_SINGLE_EXECUTABLE_APPLICATION)
 }
 
 }  // anonymous namespace
@@ -283,12 +259,17 @@ SeaResource FindSingleExecutableResource() {
   return sea_resource;
 }
 
-bool IsSingleExecutable() {
-  return postject_has_resource();
-}
-
 void IsSea(const FunctionCallbackInfo<Value>& args) {
   args.GetReturnValue().Set(IsSingleExecutable());
+}
+
+void IsVfsEnabled(const FunctionCallbackInfo<Value>& args) {
+  bool enabled = false;
+  if (IsSingleExecutable()) {
+    SeaResource sea_resource = FindSingleExecutableResource();
+    enabled = static_cast<bool>(sea_resource.flags & SeaFlags::kEnableVfs);
+  }
+  args.GetReturnValue().Set(enabled);
 }
 
 void IsExperimentalSeaWarningNeeded(const FunctionCallbackInfo<Value>& args) {
@@ -309,7 +290,9 @@ void IsExperimentalSeaWarningNeeded(const FunctionCallbackInfo<Value>& args) {
       sea_resource.flags & SeaFlags::kDisableExperimentalSeaWarning));
 }
 
-std::tuple<int, char**> FixupArgsForSEA(int argc, char** argv) {
+std::tuple<int, char**> FixupArgsForSEA(int argc,
+                                        char** argv,
+                                        std::vector<std::string>* errors) {
   // Repeats argv[0] at position 1 on argv as a replacement for the missing
   // entry point file path.
   if (IsSingleExecutable()) {
@@ -329,8 +312,10 @@ std::tuple<int, char**> FixupArgsForSEA(int argc, char** argv) {
       for (int i = 1; i < argc; ++i) {
         if (strncmp(argv[i], "--node-options=", 15) == 0) {
           std::string node_options = argv[i] + 15;
-          std::vector<std::string> errors;
-          cli_extension_args = ParseNodeOptionsEnvVar(node_options, &errors);
+          cli_extension_args = ParseNodeOptionsEnvVar(node_options, errors);
+          if (!errors->empty()) {
+            return {argc, argv};
+          }
           // Remove this argument by shifting the rest
           for (int j = i; j < argc - 1; ++j) {
             argv[j] = argv[j + 1];
@@ -347,10 +332,11 @@ std::tuple<int, char**> FixupArgsForSEA(int argc, char** argv) {
                      cli_extension_args.size() + 2);
     new_argv.emplace_back(argv[0]);
 
+    exec_argv_storage.reserve(sea_resource.exec_argv.size() +
+                              cli_extension_args.size());
+
     // Insert exec argv from SEA config
     if (!sea_resource.exec_argv.empty()) {
-      exec_argv_storage.reserve(sea_resource.exec_argv.size() +
-                                cli_extension_args.size());
       for (const auto& arg : sea_resource.exec_argv) {
         exec_argv_storage.emplace_back(arg);
         new_argv.emplace_back(exec_argv_storage.back().data());
@@ -372,17 +358,6 @@ std::tuple<int, char**> FixupArgsForSEA(int argc, char** argv) {
 
   return {argc, argv};
 }
-
-namespace {
-
-struct SeaConfig {
-  std::string main_path;
-  std::string output_path;
-  SeaFlags flags = SeaFlags::kDefault;
-  SeaExecArgvExtension exec_argv_extension = SeaExecArgvExtension::kEnv;
-  std::unordered_map<std::string, std::string> assets;
-  std::vector<std::string> exec_argv;
-};
 
 std::optional<SeaConfig> ParseSingleExecutableConfig(
     const std::string& config_path) {
@@ -441,6 +416,14 @@ std::optional<SeaConfig> ParseSingleExecutableConfig(
                 config_path);
         return std::nullopt;
       }
+    } else if (key == "executable") {
+      if (field.value().get_string().get(result.executable_path) ||
+          result.executable_path.empty()) {
+        FPrintF(stderr,
+                "\"executable\" field of %s is not a non-empty string\n",
+                config_path);
+        return std::nullopt;
+      }
     } else if (key == "disableExperimentalSEAWarning") {
       bool disable_experimental_sea_warning;
       if (field.value().get_bool().get(disable_experimental_sea_warning)) {
@@ -472,6 +455,16 @@ std::optional<SeaConfig> ParseSingleExecutableConfig(
       }
       if (use_code_cache_value) {
         result.flags |= SeaFlags::kUseCodeCache;
+      }
+    } else if (key == "useVfs") {
+      bool use_vfs;
+      if (field.value().get_bool().get(use_vfs)) {
+        FPrintF(
+            stderr, "\"useVfs\" field of %s is not a Boolean\n", config_path);
+        return std::nullopt;
+      }
+      if (use_vfs) {
+        result.flags |= SeaFlags::kEnableVfs;
       }
     } else if (key == "assets") {
       simdjson::ondemand::object assets_object;
@@ -544,7 +537,34 @@ std::optional<SeaConfig> ParseSingleExecutableConfig(
                 config_path);
         return std::nullopt;
       }
+    } else if (key == "mainFormat") {
+      std::string_view format_str;
+      if (field.value().get_string().get(format_str)) {
+        FPrintF(stderr,
+                "\"mainFormat\" field of %s is not a string\n",
+                config_path);
+        return std::nullopt;
+      }
+      if (format_str == "commonjs") {
+        result.main_format = ModuleFormat::kCommonJS;
+      } else if (format_str == "module") {
+        result.main_format = ModuleFormat::kModule;
+      } else {
+        FPrintF(stderr,
+                "\"mainFormat\" field of %s must be one of "
+                "\"commonjs\" or \"module\"\n",
+                config_path);
+        return std::nullopt;
+      }
     }
+  }
+
+  if (!document.at_end()) {
+    FPrintF(stderr,
+            "Cannot parse JSON from %s: %s\n",
+            config_path,
+            simdjson::error_message(simdjson::TRAILING_CONTENT));
+    return std::nullopt;
   }
 
   if (static_cast<bool>(result.flags & SeaFlags::kUseSnapshot) &&
@@ -553,6 +573,28 @@ std::optional<SeaConfig> ParseSingleExecutableConfig(
     // separate snapshot configurations.
     FPrintF(stderr,
             "\"useCodeCache\" is redundant when \"useSnapshot\" is true\n");
+  }
+
+  // TODO(joyeecheung): support ESM with useSnapshot.
+  if (result.main_format == ModuleFormat::kModule &&
+      static_cast<bool>(result.flags & SeaFlags::kUseSnapshot)) {
+    FPrintF(stderr,
+            "\"mainFormat\": \"module\" is not supported when "
+            "\"useSnapshot\" is true\n");
+    return std::nullopt;
+  }
+
+  if (static_cast<bool>(result.flags & SeaFlags::kEnableVfs)) {
+    if (static_cast<bool>(result.flags & SeaFlags::kUseSnapshot)) {
+      FPrintF(stderr,
+              "\"useVfs\" is not supported when \"useSnapshot\" is true\n");
+      return std::nullopt;
+    }
+    if (static_cast<bool>(result.flags & SeaFlags::kUseCodeCache)) {
+      FPrintF(stderr,
+              "\"useVfs\" is not supported when \"useCodeCache\" is true\n");
+      return std::nullopt;
+    }
   }
 
   if (result.main_path.empty()) {
@@ -572,6 +614,7 @@ std::optional<SeaConfig> ParseSingleExecutableConfig(
   return result;
 }
 
+namespace {
 ExitCode GenerateSnapshotForSEA(const SeaConfig& config,
                                 const std::vector<std::string>& args,
                                 const std::vector<std::string>& exec_args,
@@ -611,7 +654,8 @@ ExitCode GenerateSnapshotForSEA(const SeaConfig& config,
 }
 
 std::optional<std::string> GenerateCodeCache(std::string_view main_path,
-                                             std::string_view main_script) {
+                                             std::string_view main_script,
+                                             ModuleFormat format) {
   RAIIIsolate raii_isolate(SnapshotBuilder::GetEmbeddedSnapshotData());
   Isolate* isolate = raii_isolate.get();
 
@@ -642,34 +686,62 @@ std::optional<std::string> GenerateCodeCache(std::string_view main_path,
     return std::nullopt;
   }
 
-  LocalVector<String> parameters(
-      isolate,
-      {
-          FIXED_ONE_BYTE_STRING(isolate, "exports"),
-          FIXED_ONE_BYTE_STRING(isolate, "require"),
-          FIXED_ONE_BYTE_STRING(isolate, "module"),
-          FIXED_ONE_BYTE_STRING(isolate, "__filename"),
-          FIXED_ONE_BYTE_STRING(isolate, "__dirname"),
-      });
-  ScriptOrigin script_origin(filename, 0, 0, true);
-  ScriptCompiler::Source script_source(content, script_origin);
-  MaybeLocal<Function> maybe_fn =
-      ScriptCompiler::CompileFunction(context,
-                                      &script_source,
-                                      parameters.size(),
-                                      parameters.data(),
-                                      0,
-                                      nullptr);
-  Local<Function> fn;
-  if (!maybe_fn.ToLocal(&fn)) {
-    return std::nullopt;
+  std::unique_ptr<ScriptCompiler::CachedData> cache;
+
+  if (format == ModuleFormat::kModule) {
+    // Using empty host defined options is fine as it is not part of the cache
+    // key and will be reset after deserialization.
+    ScriptOrigin origin(filename,
+                        0,               // line offset
+                        0,               // column offset
+                        true,            // is cross origin
+                        -1,              // script id
+                        Local<Value>(),  // source map URL
+                        false,           // is opaque
+                        false,           // is WASM
+                        true,            // is ES Module
+                        Local<Data>());  // host defined options
+    ScriptCompiler::Source source(content, origin);
+    Local<Module> module;
+    if (!ScriptCompiler::CompileModule(isolate, &source).ToLocal(&module)) {
+      return std::nullopt;
+    }
+    Local<UnboundModuleScript> unbound = module->GetUnboundModuleScript();
+    cache.reset(ScriptCompiler::CreateCodeCache(unbound));
+  } else {
+    // TODO(RaisinTen): Using the V8 code cache prevents us from using
+    // `import()` in the SEA code. Support it. Refs:
+    // https://github.com/nodejs/node/pull/48191#discussion_r1213271430
+    // TODO(joyeecheung): this likely has been fixed by
+    // https://chromium-review.googlesource.com/c/v8/v8/+/5401780 - add a test
+    // and update docs.
+    LocalVector<String> parameters(
+        isolate,
+        {
+            FIXED_ONE_BYTE_STRING(isolate, "exports"),
+            FIXED_ONE_BYTE_STRING(isolate, "require"),
+            FIXED_ONE_BYTE_STRING(isolate, "module"),
+            FIXED_ONE_BYTE_STRING(isolate, "__filename"),
+            FIXED_ONE_BYTE_STRING(isolate, "__dirname"),
+        });
+    ScriptOrigin script_origin(filename, 0, 0, true);
+    ScriptCompiler::Source script_source(content, script_origin);
+    Local<Function> fn;
+    if (!ScriptCompiler::CompileFunction(context,
+                                         &script_source,
+                                         parameters.size(),
+                                         parameters.data(),
+                                         0,
+                                         nullptr)
+             .ToLocal(&fn)) {
+      return std::nullopt;
+    }
+    cache.reset(ScriptCompiler::CreateCodeCacheForFunction(fn));
   }
 
-  // TODO(RaisinTen): Using the V8 code cache prevents us from using `import()`
-  // in the SEA code. Support it.
-  // Refs: https://github.com/nodejs/node/pull/48191#discussion_r1213271430
-  std::unique_ptr<ScriptCompiler::CachedData> cache{
-      ScriptCompiler::CreateCodeCacheForFunction(fn)};
+  if (!cache) {
+    return std::nullopt;
+  }
   std::string code_cache(cache->data, cache->data + cache->length);
   return code_cache;
 }
@@ -681,7 +753,7 @@ int BuildAssets(const std::unordered_map<std::string, std::string>& config,
     int r = ReadFileSync(&blob, path.c_str());
     if (r != 0) {
       const char* err = uv_strerror(r);
-      FPrintF(stderr, "Cannot read asset %s: %s\n", path.c_str(), err);
+      FPrintF(stderr, "Cannot read asset %s: %s\n", path, err);
       return r;
     }
     assets->emplace(key, std::move(blob));
@@ -689,7 +761,10 @@ int BuildAssets(const std::unordered_map<std::string, std::string>& config,
   return 0;
 }
 
+}  // anonymous namespace
+
 ExitCode GenerateSingleExecutableBlob(
+    std::vector<char>* out,
     const SeaConfig& config,
     const std::vector<std::string>& args,
     const std::vector<std::string>& exec_args) {
@@ -720,7 +795,7 @@ ExitCode GenerateSingleExecutableBlob(
   std::string code_cache;
   if (static_cast<bool>(config.flags & SeaFlags::kUseCodeCache)) {
     std::optional<std::string> optional_code_cache =
-        GenerateCodeCache(config.main_path, main_script);
+        GenerateCodeCache(config.main_path, main_script, config.main_format);
     if (!optional_code_cache.has_value()) {
       FPrintF(stderr, "Cannot generate V8 code cache\n");
       return ExitCode::kGenericUserError;
@@ -748,15 +823,35 @@ ExitCode GenerateSingleExecutableBlob(
       builds_snapshot_from_main
           ? std::string_view{snapshot_blob.data(), snapshot_blob.size()}
           : std::string_view{main_script.data(), main_script.size()},
+      config.main_format,
       optional_sv_code_cache,
       assets_view,
       exec_argv_view};
 
   SeaSerializer serializer;
   serializer.Write(sea);
+  std::swap(*out, serializer.sink);
+  return ExitCode::kNoFailure;
+}
 
-  uv_buf_t buf = uv_buf_init(serializer.sink.data(), serializer.sink.size());
-  r = WriteFileSync(config.output_path.c_str(), buf);
+ExitCode WriteSingleExecutableBlob(const std::string& config_path,
+                                   const std::vector<std::string>& args,
+                                   const std::vector<std::string>& exec_args) {
+  std::optional<SeaConfig> config_opt =
+      ParseSingleExecutableConfig(config_path);
+  if (!config_opt.has_value()) {
+    return ExitCode::kGenericUserError;
+  }
+
+  SeaConfig config = config_opt.value();
+  std::vector<char> blob;
+  ExitCode exit_code =
+      GenerateSingleExecutableBlob(&blob, config, args, exec_args);
+  if (exit_code != ExitCode::kNoFailure) {
+    return exit_code;
+  }
+  uv_buf_t buf = uv_buf_init(blob.data(), blob.size());
+  int r = WriteFileSync(config.output_path.c_str(), buf);
   if (r != 0) {
     const char* err = uv_strerror(r);
     FPrintF(stderr, "Cannot write output to %s:%s\n", config.output_path, err);
@@ -769,22 +864,6 @@ ExitCode GenerateSingleExecutableBlob(
   return ExitCode::kNoFailure;
 }
 
-}  // anonymous namespace
-
-ExitCode BuildSingleExecutableBlob(const std::string& config_path,
-                                   const std::vector<std::string>& args,
-                                   const std::vector<std::string>& exec_args) {
-  std::optional<SeaConfig> config_opt =
-      ParseSingleExecutableConfig(config_path);
-  if (config_opt.has_value()) {
-    ExitCode code =
-        GenerateSingleExecutableBlob(config_opt.value(), args, exec_args);
-    return code;
-  }
-
-  return ExitCode::kGenericUserError;
-}
-
 void GetAsset(const FunctionCallbackInfo<Value>& args) {
   CHECK_EQ(args.Length(), 1);
   CHECK(args[0]->IsString());
@@ -793,7 +872,7 @@ void GetAsset(const FunctionCallbackInfo<Value>& args) {
   if (sea_resource.assets.empty()) {
     return;
   }
-  auto it = sea_resource.assets.find(*key);
+  auto it = sea_resource.assets.find(std::string_view(*key, key.length()));
   if (it == sea_resource.assets.end()) {
     return;
   }
@@ -828,20 +907,25 @@ void GetAssetKeys(const FunctionCallbackInfo<Value>& args) {
 }
 
 MaybeLocal<Value> LoadSingleExecutableApplication(
-    const StartExecutionCallbackInfo& info) {
+    const StartExecutionCallbackInfoWithModule& info) {
   // Here we are currently relying on the fact that in NodeMainInstance::Run(),
   // env->context() is entered.
-  Local<Context> context = Isolate::GetCurrent()->GetCurrentContext();
-  Environment* env = Environment::GetCurrent(context);
+  Environment* env = info.env();
+  Local<Context> context = env->context();
   SeaResource sea = FindSingleExecutableResource();
 
   CHECK(!sea.use_snapshot());
   // TODO(joyeecheung): this should be an external string. Refactor UnionBytes
   // and make it easy to create one based on static content on the fly.
   Local<Value> main_script =
-      ToV8Value(env->context(), sea.main_code_or_snapshot).ToLocalChecked();
-  return info.run_cjs->Call(
-      env->context(), Null(env->isolate()), 1, &main_script);
+      ToV8Value(context, sea.main_code_or_snapshot).ToLocalChecked();
+  Local<Value> kind =
+      v8::Integer::New(env->isolate(), static_cast<int>(sea.main_code_format));
+  Local<Value> resource_name =
+      ToV8Value(context, env->exec_path()).ToLocalChecked();
+  Local<Value> args[] = {main_script, kind, resource_name};
+  return info.run_module()->Call(
+      env->context(), Null(env->isolate()), arraysize(args), args);
 }
 
 bool MaybeLoadSingleExecutableApplication(Environment* env) {
@@ -857,7 +941,7 @@ bool MaybeLoadSingleExecutableApplication(Environment* env) {
     // this check is just here to guard against the unlikely case where
     // the SEA preparation blob has been manually modified by someone.
     CHECK(!env->snapshot_deserialize_main().IsEmpty());
-    LoadEnvironment(env, StartExecutionCallback{});
+    LoadEnvironment(env, StartExecutionCallbackWithModule{});
     return true;
   }
 
@@ -872,7 +956,31 @@ void Initialize(Local<Object> target,
                 Local<Value> unused,
                 Local<Context> context,
                 void* priv) {
+  Environment* env = Environment::GetCurrent(context);
+  Isolate* isolate = env->isolate();
+
+  if (IsSingleExecutable()) {
+    SeaResource sea_resource = FindSingleExecutableResource();
+    // Expose the main script path recorded in the SEA config so the VFS
+    // integration can place the main script at the mount point root.
+    if (static_cast<bool>(sea_resource.flags & SeaFlags::kEnableVfs)) {
+      Local<String> code_path_str;
+      if (String::NewFromUtf8(isolate,
+                              sea_resource.code_path.data(),
+                              NewStringType::kNormal,
+                              sea_resource.code_path.length())
+              .ToLocal(&code_path_str)) {
+        target
+            ->Set(context,
+                  FIXED_ONE_BYTE_STRING(isolate, "mainCodePath"),
+                  code_path_str)
+            .Check();
+      }
+    }
+  }
+
   SetMethod(context, target, "isSea", IsSea);
+  SetMethod(context, target, "isVfsEnabled", IsVfsEnabled);
   SetMethod(context,
             target,
             "isExperimentalSeaWarningNeeded",
@@ -883,6 +991,7 @@ void Initialize(Local<Object> target,
 
 void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(IsSea);
+  registry->Register(IsVfsEnabled);
   registry->Register(IsExperimentalSeaWarningNeeded);
   registry->Register(GetAsset);
   registry->Register(GetAssetKeys);

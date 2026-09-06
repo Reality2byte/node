@@ -140,7 +140,7 @@ TEST(GetObjectProperties) {
   v8::HandleScope scope(isolate);
   LocalContext context;
   // Claim we don't know anything about the heap layout.
-  d::HeapAddresses heap_addresses{0, 0, 0, 0, 0};
+  d::HeapAddresses heap_addresses{0, 0, 0, 0, 0, 0};
 
   v8::Local<v8::Value> v = CompileRun("42");
   DirectHandle<Object> o = v8::Utils::OpenDirectHandle(*v);
@@ -492,7 +492,7 @@ static void FrameIterationCheck(
 
 THREADED_TEST(GetFrameStack) {
   LocalContext env;
-  v8::Isolate* isolate = env->GetIsolate();
+  v8::Isolate* isolate = env.isolate();
   i::Isolate* i_isolate = reinterpret_cast<Isolate*>(isolate);
   PtrComprCageAccessScope ptr_compr_cage_access_scope(i_isolate);
   v8::HandleScope scope(isolate);
@@ -513,7 +513,7 @@ THREADED_TEST(GetFrameStack) {
 
 TEST(SmallOrderedHashSetGetObjectProperties) {
   LocalContext context;
-  Isolate* isolate = reinterpret_cast<Isolate*>((*context)->GetIsolate());
+  Isolate* isolate = context.i_isolate();
   Factory* factory = isolate->factory();
   PtrComprCageAccessScope ptr_compr_cage_access_scope(isolate);
   HandleScope scope(isolate);
@@ -525,7 +525,7 @@ TEST(SmallOrderedHashSetGetObjectProperties) {
 
   // Verify with the definition of SmallOrderedHashSet in
   // src\objects\ordered-hash-table.tq.
-  d::HeapAddresses heap_addresses{0, 0, 0, 0, 0};
+  d::HeapAddresses heap_addresses{0, 0, 0, 0, 0, 0};
   d::ObjectPropertiesResultPtr props =
       d::GetObjectProperties(set->ptr(), &ReadMemory, heap_addresses);
   CHECK_EQ(props->type_check_result, d::TypeCheckResult::kUsedMap);

@@ -6,7 +6,8 @@ if (!common.hasCrypto)
   common.skip('missing crypto');
 
 const assert = require('assert');
-const { hasOpenSSL } = require('../common/crypto');
+const { hasOpenSSL, isBoringSSL } = require('../common/crypto');
+const { getFips } = require('crypto');
 const { subtle } = globalThis.crypto;
 
 // This is only a partial test. The WebCrypto Web Platform Tests
@@ -43,14 +44,14 @@ const { subtle } = globalThis.crypto;
       name: 'RSA-OAEP',
     }, privateKey, buf), {
       name: 'InvalidAccessError',
-      message: 'The requested operation is not valid for the provided key'
+      message: 'Unable to use this key to encrypt'
     });
 
     await assert.rejects(() => subtle.decrypt({
       name: 'RSA-OAEP',
     }, publicKey, ciphertext), {
       name: 'InvalidAccessError',
-      message: 'The requested operation is not valid for the provided key'
+      message: 'Unable to use this key to decrypt'
     });
   }
 
@@ -58,7 +59,7 @@ const { subtle } = globalThis.crypto;
 }
 
 // Test Encrypt/Decrypt RSA-OAEP w/ SHA-3
-if (!process.features.openssl_is_boringssl) {
+if (!isBoringSSL) {
   const buf = globalThis.crypto.getRandomValues(new Uint8Array(50));
 
   async function test() {
@@ -88,14 +89,14 @@ if (!process.features.openssl_is_boringssl) {
       name: 'RSA-OAEP',
     }, privateKey, buf), {
       name: 'InvalidAccessError',
-      message: 'The requested operation is not valid for the provided key'
+      message: 'Unable to use this key to encrypt'
     });
 
     await assert.rejects(() => subtle.decrypt({
       name: 'RSA-OAEP',
     }, publicKey, ciphertext), {
       name: 'InvalidAccessError',
-      message: 'The requested operation is not valid for the provided key'
+      message: 'Unable to use this key to decrypt'
     });
   }
 
@@ -207,7 +208,15 @@ if (hasOpenSSL(3)) {
       Buffer.from(buf).toString('hex'));
   }
 
-  test().then(common.mustCall());
+  if (getFips() === 1) {
+    assert.rejects(
+      test(),
+      (err) => err.name === 'OperationError' &&
+               err.cause?.code === 'ERR_OSSL_EVP_UNSUPPORTED')
+      .then(common.mustCall());
+  } else {
+    test().then(common.mustCall());
+  }
 } else {
   common.printSkipMessage('Skipping unsupported AES-OCB test cases');
 }

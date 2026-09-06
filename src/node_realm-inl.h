@@ -5,6 +5,7 @@
 
 #include "node_context_data.h"
 #include "node_realm.h"
+#include "util-inl.h"
 
 namespace node {
 
@@ -20,8 +21,8 @@ inline Realm* Realm::GetCurrent(v8::Local<v8::Context> context) {
   if (!ContextEmbedderTag::IsNodeContext(context)) [[unlikely]] {
     return nullptr;
   }
-  return static_cast<Realm*>(
-      context->GetAlignedPointerFromEmbedderData(ContextEmbedderIndex::kRealm));
+  return static_cast<Realm*>(context->GetAlignedPointerFromEmbedderData(
+      ContextEmbedderIndex::kRealm, EmbedderDataTag::kPerContextData));
 }
 
 inline Realm* Realm::GetCurrent(
@@ -44,6 +45,10 @@ inline Environment* Realm::env() const {
 
 inline v8::Isolate* Realm::isolate() const {
   return isolate_;
+}
+
+inline v8::Local<v8::Context> Realm::context() const {
+  return PersistentToLocal::Strong(context_);
 }
 
 inline Realm::Kind Realm::kind() const {
@@ -87,10 +92,8 @@ inline T* Realm::GetBindingData() {
   return result;
 }
 
-template <typename T, typename... Args>
+template <std::derived_from<BaseObject> T, typename... Args>
 inline T* Realm::AddBindingData(v8::Local<v8::Object> target, Args&&... args) {
-  // This won't compile if T is not a BaseObject subclass.
-  static_assert(std::is_base_of_v<BaseObject, T>);
   // The binding data must be weak so that it won't keep the realm reachable
   // from strong GC roots indefinitely. The wrapper object of binding data
   // should be referenced from JavaScript, thus the binding data should be

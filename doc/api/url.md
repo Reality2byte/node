@@ -830,6 +830,7 @@ console.log(myPattern.exec('https://nodejs.org/docs/latest/api/dns.html'));
 
 * `input` {string | Object} A URL or URL parts
 * `baseURL` {string | undefined} A base URL string
+* Returns {boolean}
 
 Input can be a string or an object providing the individual URL parts. The
 object members can be any of `protocol`, `username`, `password`, `hostname`,
@@ -1329,6 +1330,19 @@ changes:
 This function ensures the correct decodings of percent-encoded characters as
 well as ensuring a cross-platform valid absolute path string.
 
+**Security Considerations:**
+
+This function decodes percent-encoded characters, including encoded dot-segments
+(`%2e` as `.` and `%2e%2e` as `..`), and then normalizes the resulting path.
+This means that encoded directory traversal sequences (such as `%2e%2e`) are
+decoded and processed as actual path traversal, even though encoded slashes
+(`%2F`, `%5C`) are correctly rejected.
+
+**Applications must not rely on `fileURLToPath()` alone to prevent directory
+traversal attacks.** Always perform explicit path validation and security checks
+on the returned path value to ensure it remains within expected boundaries
+before using it for file system operations.
+
 ```mjs
 import { fileURLToPath } from 'node:url';
 
@@ -1383,6 +1397,15 @@ Like `url.fileURLToPath(...)` except that instead of returning a string
 representation of the path, a `Buffer` is returned. This conversion is
 helpful when the input URL contains percent-encoded segments that are
 not valid UTF-8 / Unicode sequences.
+
+**Security Considerations:**
+
+This function has the same security considerations as [`url.fileURLToPath()`][].
+It decodes percent-encoded characters, including encoded dot-segments
+(`%2e` as `.` and `%2e%2e` as `..`), and normalizes the path. **Applications
+must not rely on this function alone to prevent directory traversal attacks.**
+Always perform explicit path validation on the returned buffer value before
+using it for file system operations.
 
 ### `url.format(URL[, options])`
 
@@ -1717,9 +1740,9 @@ changes:
                  times.
 -->
 
-* `urlObject` {Object|string} A URL object (as returned by `url.parse()` or
-  constructed otherwise). If a string, it is converted to an object by passing
-  it to `url.parse()`.
+* `urlObject` {Object} A URL object (as returned by `url.parse()` or
+  constructed otherwise).
+* Returns: {string}
 
 The `url.format()` method returns a formatted URL string derived from
 `urlObject`.
@@ -1794,11 +1817,69 @@ The formatting process operates as follows:
   string, an [`Error`][] is thrown.
 * `result` is returned.
 
+An automated migration is available ([source](https://github.com/nodejs/userland-migrations/tree/main/recipes/node-url-to-whatwg-url)).
+
+```bash
+npx codemod@latest @nodejs/node-url-to-whatwg-url
+```
+
+### `url.format(urlString)`
+
+<!-- YAML
+added: v0.1.25
+changes:
+  - version:
+      - v24.0.0
+    pr-url: https://github.com/nodejs/node/pull/55017
+    description: Application deprecation.
+-->
+
+> Stability: 0 - Deprecated: Use the WHATWG URL API instead.
+
+* `urlString` {string} A string that will be passed to `url.parse()` and then
+  formatted.
+* Returns: {string}
+
+`url.format(urlString)` is shorthand for `url.format(url.parse(urlString))`.
+
+Because it invokes the deprecated [`url.parse()`][] internally, passing a string argument
+to `url.format()` is itself deprecated.
+
+Canonicalizing a URL string can be performed using the WHATWG URL API, by
+constructing a new URL object and calling [`url.toString()`][].
+
+```mjs
+import { URL } from 'node:url';
+
+const unformatted = 'http://[fe80:0:0:0:0:0:0:1]:/a/b?a=b#abc';
+const formatted = new URL(unformatted).toString();
+
+console.log(formatted); // Prints: http://[fe80::1]/a/b?a=b#abc
+```
+
+```cjs
+const { URL } = require('node:url');
+
+const unformatted = 'http://[fe80:0:0:0:0:0:0:1]:/a/b?a=b#abc';
+const formatted = new URL(unformatted).toString();
+
+console.log(formatted); // Prints: http://[fe80::1]/a/b?a=b#abc
+```
+
 ### `url.parse(urlString[, parseQueryString[, slashesDenoteHost]])`
 
 <!-- YAML
 added: v0.1.25
 changes:
+  - version:
+      - v24.0.0
+    pr-url: https://github.com/nodejs/node/pull/55017
+    description: Application deprecation.
+  - version:
+      - v19.9.0
+      - v18.17.0
+    pr-url: https://github.com/nodejs/node/pull/47203
+    description: Added support for `--pending-deprecation`.
   - version:
       - v19.0.0
       - v18.13.0
@@ -1853,7 +1934,7 @@ input. CVEs are not issued for `url.parse()` vulnerabilities. Use the
 function getURL(req) {
   const proto = req.headers['x-forwarded-proto'] || 'https';
   const host = req.headers['x-forwarded-host'] || req.headers.host || 'example.com';
-  return new URL(req.url || '/', `${proto}://${host}`);
+  return new URL(`${proto}://${host}${req.url || '/'}`);
 }
 ```
 
@@ -1863,8 +1944,14 @@ use the example below:
 
 ```js
 function getURL(req) {
-  return new URL(req.url || '/', 'https://example.com');
+  return new URL(`https://example.com${req.url || '/'}`);
 }
+```
+
+An automated migration is available ([source](https://github.com/nodejs/userland-migrations/tree/main/recipes/node-url-to-whatwg-url)).
+
+```bash
+npx codemod@latest @nodejs/node-url-to-whatwg-url
 ```
 
 ### `url.resolve(from, to)`
@@ -1872,6 +1959,10 @@ function getURL(req) {
 <!-- YAML
 added: v0.1.25
 changes:
+  - version:
+      - v24.0.0
+    pr-url: https://github.com/nodejs/node/pull/55017
+    description: Deprecated again through DEP0169.
   - version:
       - v15.13.0
       - v14.17.0
@@ -1895,6 +1986,8 @@ changes:
                  contains a hostname.
 -->
 
+> Stability: 0 - Deprecated: Use the WHATWG URL API instead.
+
 * `from` {string} The base URL to use if `to` is a relative URL.
 * `to` {string} The target URL to resolve.
 
@@ -1907,6 +2000,8 @@ url.resolve('/one/two/three', 'four');         // '/one/two/four'
 url.resolve('http://example.com/', '/one');    // 'http://example.com/one'
 url.resolve('http://example.com/one', '/two'); // 'http://example.com/two'
 ```
+
+Because it invokes the deprecated [`url.parse()`][] internally, `url.resolve()` is itself deprecated.
 
 To achieve the same result using the WHATWG URL API:
 
@@ -2002,6 +2097,7 @@ console.log(myURL.origin);
 [`querystring`]: querystring.md
 [`url.domainToASCII()`]: #urldomaintoasciidomain
 [`url.domainToUnicode()`]: #urldomaintounicodedomain
+[`url.fileURLToPath()`]: #urlfileurltopathurl-options
 [`url.format()`]: #urlformaturlobject
 [`url.href`]: #urlhref
 [`url.parse()`]: #urlparseurlstring-parsequerystring-slashesdenotehost

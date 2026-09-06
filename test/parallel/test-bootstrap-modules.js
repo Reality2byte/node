@@ -20,10 +20,10 @@ const actual = {
 // add more builtins to worker snapshots, we should also distinguish
 // the two stages for them.
 const expected = {};
+const getFormatNativeModule = 'NativeModule internal/modules/esm/get_format';
 
 expected.beforePreExec = new Set([
   'Internal Binding builtins',
-  'Internal Binding encoding_binding',
   'Internal Binding modules',
   'Internal Binding errors',
   'Internal Binding util',
@@ -51,6 +51,7 @@ expected.beforePreExec = new Set([
   'NativeModule events',
   'Internal Binding buffer',
   'Internal Binding string_decoder',
+  'NativeModule util/types',
   'NativeModule internal/buffer',
   'NativeModule buffer',
   'Internal Binding messaging',
@@ -87,8 +88,6 @@ expected.beforePreExec = new Set([
   'NativeModule internal/v8/startup_snapshot',
   'NativeModule internal/process/signal',
   'Internal Binding fs',
-  'NativeModule internal/encoding',
-  'NativeModule internal/blob',
   'NativeModule internal/fs/utils',
   'NativeModule fs',
   'Internal Binding options',
@@ -101,37 +100,61 @@ expected.beforePreExec = new Set([
   'NativeModule internal/modules/package_json_reader',
   'Internal Binding module_wrap',
   'NativeModule internal/modules/cjs/loader',
+  'NativeModule internal/modules/package_map',
   'NativeModule diagnostics_channel',
+  'Internal Binding diagnostics_channel',
   'Internal Binding wasm_web_api',
   'NativeModule internal/events/abort_listener',
-  'NativeModule internal/modules/typescript',
-  'NativeModule internal/data_url',
-  'NativeModule internal/mime',
+  'NativeModule internal/modules/esm/utils',
+  'Internal Binding worker',
+  'NativeModule internal/modules/run_main',
+  getFormatNativeModule,
+  'NativeModule internal/trace_events',
 ]);
 
 expected.atRunTime = new Set([
-  'Internal Binding worker',
-  'NativeModule internal/modules/run_main',
-  'NativeModule internal/net',
-  'NativeModule internal/dns/utils',
   'NativeModule internal/process/pre_execution',
-  'NativeModule internal/modules/esm/utils',
 ]);
 
 const { isMainThread } = require('worker_threads');
+// Binaries built without the snapshot (e.g. cross-compiled) and
+// --no-node-snapshot bootstrap the context from scratch; so do workers under
+// --no-worker-snapshot.
+const contextFromSnapshot =
+  process.config.variables.node_use_node_snapshot &&
+  !process.execArgv.includes('--no-node-snapshot') &&
+  (isMainThread || !process.execArgv.includes('--no-worker-snapshot'));
 
-if (isMainThread) {
+if (contextFromSnapshot) {
   [
+    'Internal Binding cjs_lexer',
+    'NativeModule internal/modules/esm/assert',
+    'NativeModule internal/modules/esm/loader',
+    'NativeModule internal/modules/esm/load',
+    'NativeModule internal/modules/esm/resolve',
+    'NativeModule internal/modules/esm/translators',
+    'NativeModule internal/modules/esm/module_job',
+    'NativeModule internal/modules/esm/module_map',
     'NativeModule url',
+    'Internal Binding encoding_binding',
+    'NativeModule internal/blob',
+    'NativeModule internal/data_url',
+    'NativeModule internal/dns/utils',
+    'NativeModule internal/encoding',
+    'NativeModule internal/encoding/single-byte',
+    'NativeModule internal/encoding/util',
+    'NativeModule internal/mime',
+    'NativeModule internal/modules/typescript',
+    'NativeModule internal/net',
   ].forEach(expected.beforePreExec.add.bind(expected.beforePreExec));
-} else {  // Worker.
+} else if (isMainThread) {
+  expected.beforePreExec.delete(getFormatNativeModule);
+  expected.atRunTime.add(getFormatNativeModule);
+}
+if (!isMainThread) {
   [
-    'Internal Binding locks',
     'NativeModule diagnostics_channel',
     'NativeModule internal/abort_controller',
-    'NativeModule internal/error_serdes',
-    'NativeModule internal/locks',
-    'NativeModule internal/perf/event_loop_utilization',
     'NativeModule internal/process/worker_thread_only',
     'NativeModule internal/streams/add-abort-signal',
     'NativeModule internal/streams/compose',
@@ -173,7 +196,7 @@ if (common.hasIntl) {
 if (process.features.inspector) {
   expected.beforePreExec.add('Internal Binding inspector');
   expected.beforePreExec.add('NativeModule internal/util/inspector');
-  expected.atRunTime.add('NativeModule internal/inspector_async_hook');
+  expected.beforePreExec.add('NativeModule internal/inspector_async_hook');
 }
 
 // This is loaded if the test is run with NODE_V8_COVERAGE.

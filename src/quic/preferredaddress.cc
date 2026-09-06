@@ -1,4 +1,4 @@
-#if HAVE_OPENSSL
+#if HAVE_OPENSSL && HAVE_QUIC
 #include "guard.h"
 #ifndef OPENSSL_NO_QUIC
 #include <env-inl.h>
@@ -17,6 +17,7 @@ namespace node {
 using v8::Just;
 using v8::Local;
 using v8::Maybe;
+using v8::Object;
 using v8::Value;
 
 namespace quic {
@@ -31,19 +32,17 @@ std::optional<const PreferredAddress::AddressInfo> get_address_info(
     if (!paddr.ipv4_present) return std::nullopt;
     address.port = paddr.ipv4.sin_port;
     if (uv_inet_ntop(
-            FAMILY, &paddr.ipv4.sin_addr, address.host, sizeof(address.host)) ==
-        0) {
-      address.address = address.host;
-    }
+            FAMILY, &paddr.ipv4.sin_addr, address.host, sizeof(address.host)) !=
+        0)
+      return std::nullopt;
   } else {
     if (!paddr.ipv6_present) return std::nullopt;
     address.port = paddr.ipv6.sin6_port;
     if (uv_inet_ntop(FAMILY,
                      &paddr.ipv6.sin6_addr,
                      address.host,
-                     sizeof(address.host)) == 0) {
-      address.address = address.host;
-    }
+                     sizeof(address.host)) != 0)
+      return std::nullopt;
   }
   return address;
 }
@@ -133,7 +132,7 @@ Maybe<PreferredAddress::Policy> PreferredAddress::tryGetPolicy(
                               : Just(FromV8Value<Policy>(value));
 }
 
-void PreferredAddress::Initialize(Environment* env, Local<v8::Object> target) {
+void PreferredAddress::Initialize(Environment* env, Local<Object> target) {
   // The QUIC_* constants are expected to be exported out to be used on
   // the JavaScript side of the API.
   static constexpr auto PREFERRED_ADDRESS_USE =
@@ -141,7 +140,7 @@ void PreferredAddress::Initialize(Environment* env, Local<v8::Object> target) {
   static constexpr auto PREFERRED_ADDRESS_IGNORE =
       static_cast<uint8_t>(Policy::IGNORE_PREFERRED);
   static constexpr auto DEFAULT_PREFERRED_ADDRESS_POLICY =
-      static_cast<uint8_t>(Policy::USE_PREFERRED);
+      static_cast<uint8_t>(Policy::IGNORE_PREFERRED);
 
   NODE_DEFINE_CONSTANT(target, PREFERRED_ADDRESS_IGNORE);
   NODE_DEFINE_CONSTANT(target, PREFERRED_ADDRESS_USE);
@@ -156,4 +155,4 @@ const CID PreferredAddress::cid() const {
 }  // namespace node
 
 #endif  // OPENSSL_NO_QUIC
-#endif  // HAVE_OPENSSL
+#endif  // HAVE_OPENSSL && HAVE_QUIC

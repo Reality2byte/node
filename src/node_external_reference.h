@@ -42,6 +42,8 @@ class ExternalReferenceRegistry {
   // Registers both the underlying function pointer
   // and the corresponding CFunctionInfo.
   void Register(const v8::CFunction& c_func) {
+    RegisterT(&c_func);
+    // TODO(joyeecheung): remove below when V8 14.8 lands.
     RegisterT(c_func.GetAddress());
     RegisterT(c_func.GetTypeInfo());
   }
@@ -67,9 +69,11 @@ class ExternalReferenceRegistry {
   V(buffer)                                                                    \
   V(builtins)                                                                  \
   V(cares_wrap)                                                                \
+  V(cjs_lexer)                                                                 \
   V(config)                                                                    \
   V(contextify)                                                                \
   V(credentials)                                                               \
+  V(diagnostics_channel)                                                       \
   V(encoding_binding)                                                          \
   V(env_var)                                                                   \
   V(errors)                                                                    \
@@ -80,6 +84,7 @@ class ExternalReferenceRegistry {
   V(heap_utils)                                                                \
   V(http_parser)                                                               \
   V(internal_only_v8)                                                          \
+  V(ipc_serdes)                                                                \
   V(locks)                                                                     \
   V(messaging)                                                                 \
   V(mksnapshot)                                                                \

@@ -170,13 +170,13 @@ tmpdir.refresh();
     pipeline(rs, res, () => {});
   });
 
-  server.listen(0, () => {
+  server.listen(0, common.mustCall(() => {
     const req = http.request({
       port: server.address().port
     });
 
     req.end();
-    req.on('response', (res) => {
+    req.on('response', common.mustCall((res) => {
       const buf = [];
       res.on('data', (data) => buf.push(data));
       res.on('end', common.mustCall(() => {
@@ -186,12 +186,12 @@ tmpdir.refresh();
         );
         server.close();
       }));
-    });
-  });
+    }));
+  }));
 }
 
 {
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(common.mustCallAtLeast((req, res) => {
     let sent = false;
     const rs = new Readable({
       read() {
@@ -208,7 +208,7 @@ tmpdir.refresh();
     });
 
     pipeline(rs, res, () => {});
-  });
+  }));
 
   server.listen(0, () => {
     const req = http.request({
@@ -226,7 +226,7 @@ tmpdir.refresh();
 }
 
 {
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(common.mustCallAtLeast((req, res) => {
     let sent = 0;
     const rs = new Readable({
       read() {
@@ -241,39 +241,43 @@ tmpdir.refresh();
     });
 
     pipeline(rs, res, () => {});
-  });
+  }));
 
-  let cnt = 10;
+  let received = 0;
 
   const badSink = new Writable({
     write(data, enc, cb) {
-      cnt--;
-      if (cnt === 0) cb(new Error('kaboom'));
+      received += data.length;
+      if (received >= 50) cb(new Error('kaboom'));
       else cb();
     }
   });
 
-  server.listen(0, () => {
+  server.listen(0, common.mustCall(() => {
     const req = http.request({
       port: server.address().port
     });
 
     req.end();
-    req.on('response', (res) => {
+    req.on('response', common.mustCall((res) => {
       pipeline(res, badSink, common.mustCall((err) => {
         assert.deepStrictEqual(err, new Error('kaboom'));
         server.close();
       }));
-    });
-  });
+    }));
+  }));
 }
 
 {
-  const server = http.createServer((req, res) => {
-    pipeline(req, res, common.mustSucceed());
-  });
+  const server = http.createServer(common.mustCallAtLeast((req, res) => {
+    pipeline(req, res, common.mustCall((err) => {
+      // The client destroys the request body source before EOF below, so the
+      // echoed response cannot finish successfully either.
+      assert.strictEqual(err?.code, 'ERR_STREAM_PREMATURE_CLOSE');
+    }));
+  }));
 
-  server.listen(0, () => {
+  server.listen(0, common.mustCall(() => {
     const req = http.request({
       port: server.address().port
     });
@@ -299,11 +303,11 @@ tmpdir.refresh();
         if (cnt === 0) rs.destroy();
       });
     });
-  });
+  }));
 }
 
 {
-  const makeTransform = () => {
+  const makeTransform = common.mustCallAtLeast(() => {
     const tr = new Transform({
       transform(data, enc, cb) {
         cb(null, data);
@@ -312,7 +316,7 @@ tmpdir.refresh();
 
     tr.on('close', common.mustCall());
     return tr;
-  };
+  });
 
   const rs = new Readable({
     read() {
@@ -375,10 +379,10 @@ tmpdir.refresh();
   });
 
   const ws = new Writable({
-    write(data, enc, cb) {
+    write: common.mustCallAtLeast((data, enc, cb) => {
       assert.deepStrictEqual(data, expected.shift());
       cb();
-    }
+    }),
   });
 
   let finished = false;
@@ -578,11 +582,11 @@ tmpdir.refresh();
 }
 
 {
-  const server = http.Server(function(req, res) {
+  const server = new http.Server(function(req, res) {
     res.write('asd');
   });
-  server.listen(0, function() {
-    http.get({ port: this.address().port }, (res) => {
+  server.listen(0, common.mustCall(function() {
+    http.get({ port: this.address().port }, common.mustCall((res) => {
       const stream = new PassThrough();
 
       stream.on('error', common.mustCall());
@@ -597,8 +601,8 @@ tmpdir.refresh();
       );
 
       stream.destroy(new Error('oh no'));
-    }).on('error', common.mustNotCall());
-  });
+    })).on('error', common.mustNotCall());
+  }));
 }
 
 {
@@ -1004,9 +1008,9 @@ tmpdir.refresh();
       cb();
     }
   });
-  pipeline(r, w, (err) => {
+  pipeline(r, w, common.mustCall((err) => {
     assert.strictEqual(err, undefined);
-  });
+  }));
   r.push('asd');
   r.push(null);
   r.emit('close');
@@ -1084,14 +1088,13 @@ tmpdir.refresh();
 {
   const server = http.createServer((req, res) => {
     req.socket.on('error', common.mustNotCall());
-    pipeline(req, new PassThrough(), (err) => {
-      assert.ifError(err);
+    pipeline(req, new PassThrough(), common.mustSucceed(() => {
       res.end();
       server.close();
-    });
+    }));
   });
 
-  server.listen(0, () => {
+  server.listen(0, common.mustCall(() => {
     const req = http.request({
       method: 'PUT',
       port: server.address().port
@@ -1099,7 +1102,7 @@ tmpdir.refresh();
     req.end('asd123');
     req.on('response', common.mustCall());
     req.on('error', common.mustNotCall());
-  });
+  }));
 }
 
 {
@@ -1210,10 +1213,10 @@ tmpdir.refresh();
       d.push(null);
     }),
     final: common.mustCall((cb) => {
-      setTimeout(() => {
+      setTimeout(common.mustCall(() => {
         assert.strictEqual(d.destroyed, false);
         cb();
-      }, 1000);
+      }), 1000);
     }),
     destroy: common.mustNotCall()
   });
@@ -1254,10 +1257,10 @@ tmpdir.refresh();
       d.push(null);
     }),
     final: common.mustCall((cb) => {
-      setTimeout(() => {
+      setTimeout(common.mustCall(() => {
         assert.strictEqual(d.destroyed, false);
         cb();
-      }, 1000);
+      }), 1000);
     }),
     // `destroy()` won't be invoked by pipeline since
     // the writable side has not completed when
@@ -1691,11 +1694,11 @@ tmpdir.refresh();
     },
   });
 
-  pipeline(src, dst, (err) => {
+  pipeline(src, dst, common.mustCall((err) => {
     assert.strictEqual(src.closed, true);
     assert.strictEqual(dst.closed, true);
     assert.strictEqual(err.message, 'problem');
-  });
+  }));
   src.destroy(new Error('problem'));
 }
 
@@ -1712,7 +1715,7 @@ tmpdir.refresh();
     passThroughs.push(new PassThrough());
   }
 
-  pipeline(src, ...passThroughs, dst, (err) => {
+  pipeline(src, ...passThroughs, dst, common.mustCall((err) => {
     assert.strictEqual(src.closed, true);
     assert.strictEqual(dst.closed, true);
     assert.strictEqual(err.message, 'problem');
@@ -1720,7 +1723,7 @@ tmpdir.refresh();
     for (let i = 0; i < passThroughs.length; i++) {
       assert.strictEqual(passThroughs[i].closed, true);
     }
-  });
+  }));
   src.destroy(new Error('problem'));
 }
 
@@ -1749,4 +1752,25 @@ tmpdir.refresh();
   pipeline(r, duplexStream, w, common.mustCall((err) => {
     assert.deepStrictEqual(err, new Error('booom'));
   }));
+}
+
+{
+  // Errors thrown in Readable.map inside pipeline should not be
+  // swallowed by AbortError when the source is an infinite stream.
+  pipeline(
+    new Readable({ read() { this.push('data'); } }),
+    new Transform({
+      readableObjectMode: true,
+      transform(chunk, encoding, callback) {
+        this.push({});
+        callback();
+      },
+    }),
+    (readable) => readable.map(async () => {
+      throw new Error('Boom!');
+    }),
+    common.mustCall((err) => {
+      assert.strictEqual(err.message, 'Boom!');
+    }),
+  );
 }

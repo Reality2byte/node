@@ -25,6 +25,21 @@ const { SendQueue } = require('./sender')
 const { WebsocketFrameSend } = require('./frame')
 const { channels } = require('../../core/diagnostics')
 
+const kRef = Symbol.for('nodejs.ref')
+const kUnref = Symbol.for('nodejs.unref')
+
+function getSocketAddress (socket) {
+  if (typeof socket?.address === 'function') {
+    return socket.address()
+  }
+
+  if (typeof socket?.session?.socket?.address === 'function') {
+    return socket.session.socket.address()
+  }
+
+  return null
+}
+
 /**
  * @typedef {object} Handler
  * @property {(response: any, extensions?: string[]) => void} onConnectionEstablished
@@ -56,6 +71,7 @@ class WebSocket extends EventTarget {
   #bufferedAmount = 0
   #protocol = ''
   #extensions = ''
+  #refed = true
 
   /** @type {SendQueue} */
   #sendQueue
@@ -180,6 +196,20 @@ class WebSocket extends EventTarget {
     // Each WebSocket object has an associated binary type, which is a
     // BinaryType. Initially it must be "blob".
     this.#binaryType = 'blob'
+  }
+
+  [kRef] () {
+    webidl.brandCheck(this, WebSocket)
+
+    this.#refed = true
+    this.#handler.socket?.ref?.()
+  }
+
+  [kUnref] () {
+    webidl.brandCheck(this, WebSocket)
+
+    this.#refed = false
+    this.#handler.socket?.unref?.()
   }
 
   /**
@@ -452,11 +482,22 @@ class WebSocket extends EventTarget {
    * @see https://websockets.spec.whatwg.org/#feedback-from-the-protocol
    */
   #onConnectionEstablished (response, parsedExtensions) {
-    // processResponse is called when the "response’s header list has been received and initialized."
+    // processResponse is called when the "response's header list has been received and initialized."
     // once this happens, the connection is open
     this.#handler.socket = response.socket
 
-    const parser = new ByteParser(this.#handler, parsedExtensions)
+    if (!this.#refed) {
+      this.#handler.socket.unref?.()
+    }
+
+    // Get options from dispatcher options
+    const maxFragments = this.#handler.controller.dispatcher?.webSocketOptions?.maxFragments
+    const maxPayloadSize = this.#handler.controller.dispatcher?.webSocketOptions?.maxPayloadSize
+
+    const parser = new ByteParser(this.#handler, parsedExtensions, {
+      maxFragments,
+      maxPayloadSize
+    })
     parser.on('drain', () => this.#handler.onParserDrain())
     parser.on('error', (err) => this.#handler.onParserError(err))
 
@@ -491,7 +532,7 @@ class WebSocket extends EventTarget {
       // Convert headers to a plain object for the event
       const headers = response.headersList.entries
       channels.open.publish({
-        address: response.socket.address(),
+        address: getSocketAddress(response.socket),
         protocol: this.#protocol,
         extensions: this.#extensions,
         websocket: this,

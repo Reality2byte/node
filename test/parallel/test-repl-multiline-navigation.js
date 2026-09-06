@@ -8,6 +8,8 @@ const assert = require('assert');
 const repl = require('internal/repl');
 const stream = require('stream');
 
+common.skipIfInspectorDisabled();
+
 class ActionStream extends stream.Stream {
   run(data) {
     const _iter = data[Symbol.iterator]();
@@ -81,6 +83,8 @@ tmpdir.refresh();
 
     r.input.run([{ name: 'down' }]);
     assert.strictEqual(r.cursor, 27);
+
+    r.close();
   });
 
   repl.createInternalRepl(
@@ -142,6 +146,8 @@ tmpdir.refresh();
 
     r.input.run([{ name: 'down' }]);
     assert.strictEqual(r.cursor, 55);
+
+    r.close();
   });
 
   repl.createInternalRepl(
@@ -185,6 +191,8 @@ tmpdir.refresh();
     r.input.run([{ name: 'up' }]);
     // Check that the line is properly displayed
     assert.strictEqual(r.line, 'let lineWithMistake = `I have some\nproblem with my syntax`');
+
+    r.close();
   });
 
   repl.createInternalRepl(
@@ -232,6 +240,8 @@ tmpdir.refresh();
     '  123, 123, 123, 123, 123, 123, 123, 123, 123, 123, 123,\n' +
     '  123\n' +
     ']\n'), true);
+
+    r.close();
   });
 
   repl.createInternalRepl(

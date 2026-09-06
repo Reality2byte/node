@@ -4,7 +4,7 @@ process.env.NODE_TEST_KNOWN_GLOBALS = 0;
 const common = require('../common');
 
 const assert = require('node:assert');
-const { getEventListeners } = require('node:events');
+const { listenerCount } = require('node:events');
 const { it, mock, describe } = require('node:test');
 const nodeTimers = require('node:timers');
 const nodeTimersPromises = require('node:timers/promises');
@@ -266,6 +266,32 @@ describe('Mock Timers Test Suite', () => {
         assert.deepStrictEqual(fn.mock.calls[0].arguments, args);
       });
 
+      it('should expose Timeout.prototype[Symbol.dispose]', (t) => {
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const fn = t.mock.fn();
+        const timeout = globalThis.setTimeout(fn, 2000);
+
+        assert.strictEqual(typeof timeout[Symbol.dispose], 'function');
+
+        timeout[Symbol.dispose]();
+        t.mock.timers.tick(2000);
+
+        assert.strictEqual(fn.mock.callCount(), 0);
+      });
+
+      it('should expose Timeout.prototype.close()', (t) => {
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const fn = t.mock.fn();
+        const timeout = globalThis.setTimeout(fn, 2000);
+
+        assert.strictEqual(typeof timeout.close, 'function');
+        assert.strictEqual(timeout.close(), timeout);
+
+        t.mock.timers.tick(2000);
+
+        assert.strictEqual(fn.mock.callCount(), 0);
+      });
+
       it('should keep setTimeout working if timers are disabled', (t, done) => {
         const now = Date.now();
         const timeout = 2;
@@ -444,8 +470,6 @@ describe('Mock Timers Test Suite', () => {
     });
 
     describe('timers/promises', () => {
-      const hasAbortListener = (signal) => !!getEventListeners(signal, 'abort').length;
-
       describe('setTimeout Suite', () => {
         it('should advance in time and trigger timers when calling the .tick function multiple times', async (t) => {
           t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -527,11 +551,9 @@ describe('Mock Timers Test Suite', () => {
         it('should abort operation when .abort is called before calling setInterval', async (t) => {
           t.mock.timers.enable({ apis: ['setTimeout'] });
           const expectedResult = 'result';
-          const controller = new AbortController();
-          controller.abort();
           const p = nodeTimersPromises.setTimeout(2000, expectedResult, {
             ref: true,
-            signal: controller.signal,
+            signal: AbortSignal.abort(),
           });
 
           await assert.rejects(() => p, {
@@ -548,11 +570,11 @@ describe('Mock Timers Test Suite', () => {
             signal: controller.signal,
           });
 
-          assert(hasAbortListener(controller.signal));
+          assert.strictEqual(listenerCount(controller.signal, 'abort'), 1);
 
           t.mock.timers.tick(500);
           await p;
-          assert(!hasAbortListener(controller.signal));
+          assert.strictEqual(listenerCount(controller.signal, 'abort'), 0);
         });
 
         it('should reject given an an invalid signal instance', async (t) => {
@@ -577,9 +599,9 @@ describe('Mock Timers Test Suite', () => {
           const ac = new AbortController();
 
           // id 1 & pos 1 in priority queue
-          nodeTimersPromises.setTimeout(100, undefined, { signal: ac.signal }).then(f1, f1);
+          nodeTimersPromises.setTimeout(100, undefined, { signal: ac.signal }).then(f1, f1).then(common.mustCall());
           // id 2 & pos 1 in priority queue (id 1 is moved to pos 2)
-          nodeTimersPromises.setTimeout(50).then(f2, f2);
+          nodeTimersPromises.setTimeout(50).then(f2, f2).then(common.mustCall());
 
           ac.abort(); // BUG: will remove timer at pos 1 not timer with id 1!
 
@@ -602,9 +624,9 @@ describe('Mock Timers Test Suite', () => {
           const ac = new AbortController();
 
           // id 1 & pos 1 in priority queue
-          nodeTimersPromises.setTimeout(50, true, { signal: ac.signal }).then(f1, f1);
+          nodeTimersPromises.setTimeout(50, true, { signal: ac.signal }).then(f1, f1).then(common.mustCall());
           // id 2 & pos 2 in priority queue
-          nodeTimersPromises.setTimeout(100).then(f2, f2);
+          nodeTimersPromises.setTimeout(100).then(f2, f2).then(common.mustCall());
 
           // First setTimeout resolves
           t.mock.timers.tick(50);
@@ -754,10 +776,8 @@ describe('Mock Timers Test Suite', () => {
           t.mock.timers.enable({ apis: ['setInterval'] });
 
           const interval = 100;
-          const abortController = new AbortController();
-          abortController.abort();
           const intervalIterator = nodeTimersPromises.setInterval(interval, Date.now(), {
-            signal: abortController.signal,
+            signal: AbortSignal.abort(),
           });
 
           const first = intervalIterator.next();
@@ -780,9 +800,9 @@ describe('Mock Timers Test Suite', () => {
           t.mock.timers.tick();
 
           await first;
-          assert(hasAbortListener(abortController.signal));
+          assert.strictEqual(listenerCount(abortController.signal, 'abort'), 1);
           await intervalIterator.return();
-          assert(!hasAbortListener(abortController.signal));
+          assert.strictEqual(listenerCount(abortController.signal, 'abort'), 0);
         });
 
         it('should abort operation given an abort controller signal on a real use case', async (t) => {

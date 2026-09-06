@@ -10,6 +10,9 @@
 #include "v8.h"
 
 #include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace node {
 namespace inspector {
@@ -19,6 +22,8 @@ using v8::Context;
 using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
+using v8::GCCallbackFlags;
+using v8::GCType;
 using v8::Global;
 using v8::HandleScope;
 using v8::Isolate;
@@ -55,27 +60,38 @@ struct MainThreadConnection {
 template <typename ConnectionType>
 class JSBindingsConnection : public BaseObject {
  public:
+  struct PendingMicrotask {
+    explicit PendingMicrotask(JSBindingsConnection* connection)
+        : env(connection->env()), connection(connection) {
+      env->AddCleanupHook(Delete, this);
+    }
+
+    static void Delete(void* data) {
+      delete static_cast<PendingMicrotask*>(data);
+    }
+
+    static void Run(void* data) {
+      std::unique_ptr<PendingMicrotask> pending(
+          static_cast<PendingMicrotask*>(data));
+      pending->env->RemoveCleanupHook(Delete, pending.get());
+      pending->connection->FlushPendingMessages();
+    }
+
+    Environment* env;
+    BaseObjectPtr<JSBindingsConnection> connection;
+  };
+
   class JSBindingsSessionDelegate : public InspectorSessionDelegate {
    public:
-    JSBindingsSessionDelegate(Environment* env,
-                              JSBindingsConnection* connection)
-                              : env_(env),
-                                connection_(connection) {
-    }
+    explicit JSBindingsSessionDelegate(JSBindingsConnection* connection)
+        : connection_(connection) {}
 
     void SendMessageToFrontend(const v8_inspector::StringView& message)
         override {
-      Isolate* isolate = env_->isolate();
-      HandleScope handle_scope(isolate);
-      Context::Scope context_scope(env_->context());
-      Local<Value> argument;
-      if (!ToV8Value(env_->context(), message, isolate).ToLocal(&argument))
-        return;
-      connection_->OnMessage(argument);
+      connection_->SendMessageToFrontend(message);
     }
 
    private:
-    Environment* env_;
     BaseObjectPtr<JSBindingsConnection> connection_;
   };
 
@@ -85,13 +101,94 @@ class JSBindingsConnection : public BaseObject {
       : BaseObject(env, wrap), callback_(env->isolate(), callback) {
     Agent* inspector = env->inspector_agent();
     session_ = ConnectionType::Connect(
-        inspector, std::make_unique<JSBindingsSessionDelegate>(env, this));
+        inspector, std::make_unique<JSBindingsSessionDelegate>(this));
+    // Inspector responses may be produced from a GC weak callback or a V8
+    // interrupt, where invoking the JavaScript session callback is forbidden.
+    // Defer delivery until it is safe to call into JavaScript.
+    env->isolate()->AddGCPrologueCallback(GCPrologueCallback, this);
+    env->isolate()->AddGCEpilogueCallback(GCEpilogueCallback, this);
+  }
+
+  ~JSBindingsConnection() override {
+    env()->isolate()->RemoveGCPrologueCallback(GCPrologueCallback, this);
+    env()->isolate()->RemoveGCEpilogueCallback(GCEpilogueCallback, this);
+  }
+
+  void SendMessageToFrontend(const v8_inspector::StringView& message) {
+    if (in_gc_ || env()->is_processing_v8_interrupt() || delivering_ ||
+        !pending_messages_.empty()) {
+      pending_messages_.emplace_back(
+          message.is8Bit()
+              ? std::u16string(message.characters8(),
+                               message.characters8() + message.length())
+              : std::u16string(message.characters16(),
+                               message.characters16() + message.length()));
+      ScheduleFlush();
+      return;
+    }
+    Isolate* isolate = env()->isolate();
+    HandleScope handle_scope(isolate);
+    Context::Scope context_scope(env()->context());
+    Local<Value> argument;
+    if (!ToV8Value(env()->context(), message, isolate).ToLocal(&argument))
+      return;
+    OnMessage(argument);
   }
 
   void OnMessage(Local<Value> value) {
     auto result = callback_.Get(env()->isolate())
                       ->Call(env()->context(), object(), 1, &value);
     (void)result;
+  }
+
+  void ScheduleFlush() {
+    if (flush_scheduled_ || delivering_) return;
+    flush_scheduled_ = true;
+    if (!in_gc_ && env()->is_processing_v8_interrupt()) {
+      auto* pending = new PendingMicrotask(this);
+      env()->context()->GetMicrotaskQueue()->EnqueueMicrotask(
+          env()->isolate(), PendingMicrotask::Run, pending);
+      return;
+    }
+    BaseObjectPtr<JSBindingsConnection> strong_ref{this};
+    env()->SetImmediate(
+        [strong_ref](Environment*) { strong_ref->FlushPendingMessages(); },
+        CallbackFlags::kUnrefed);
+  }
+
+  void FlushPendingMessages() {
+    flush_scheduled_ = false;
+    if (pending_messages_.empty()) return;
+    Isolate* isolate = env()->isolate();
+    HandleScope handle_scope(isolate);
+    Context::Scope context_scope(env()->context());
+    delivering_ = true;
+    while (!pending_messages_.empty()) {
+      std::u16string message = std::move(pending_messages_.front());
+      pending_messages_.erase(pending_messages_.begin());
+      Local<Value> argument;
+      if (ToV8Value(env()->context(), std::u16string_view(message), isolate)
+              .ToLocal(&argument)) {
+        OnMessage(argument);
+      }
+    }
+    delivering_ = false;
+  }
+
+  static void GCPrologueCallback(Isolate*,
+                                 GCType,
+                                 GCCallbackFlags,
+                                 void* data) {
+    static_cast<JSBindingsConnection*>(data)->in_gc_ = true;
+  }
+
+  static void GCEpilogueCallback(Isolate*,
+                                 GCType,
+                                 GCCallbackFlags,
+                                 void* data) {
+    auto* connection = static_cast<JSBindingsConnection*>(data);
+    connection->in_gc_ = false;
+    if (!connection->pending_messages_.empty()) connection->ScheduleFlush();
   }
 
   static void Bind(Environment* env, Local<Object> target) {
@@ -154,6 +251,10 @@ class JSBindingsConnection : public BaseObject {
  private:
   std::unique_ptr<InspectorSession> session_;
   Global<Function> callback_;
+  std::vector<std::u16string> pending_messages_;
+  bool in_gc_ = false;
+  bool delivering_ = false;
+  bool flush_scheduled_ = false;
 };
 
 static bool InspectorEnabled(Environment* env) {
@@ -240,8 +341,8 @@ static void AsyncTaskScheduledWrapper(const FunctionCallbackInfo<Value>& args) {
 
   CHECK(args[0]->IsString());
   Local<String> task_name = args[0].As<String>();
-  String::Value task_name_value(args.GetIsolate(), task_name);
-  StringView task_name_view(*task_name_value, task_name_value.length());
+  TwoByteValue task_name_value(args.GetIsolate(), task_name);
+  StringView task_name_view(task_name_value.out(), task_name_value.length());
 
   CHECK(args[1]->IsNumber());
   int64_t task_id;

@@ -48,7 +48,9 @@ WebCryptoCipherStatus AES_Cipher(Environment* env,
   CHECK_EQ(key_data.GetKeyType(), kKeyTypeSecret);
 
   auto ctx = CipherCtxPointer::New();
-  CHECK(ctx);
+  if (!ctx) {
+    return WebCryptoCipherStatus::FAILED;
+  }
 
   if (params.cipher.isWrapMode()) {
     ctx.setAllowWrap();
@@ -76,24 +78,28 @@ WebCryptoCipherStatus AES_Cipher(Environment* env,
   }
 
   size_t tag_len = 0;
+  size_t data_len = in.size();
 
   if (params.cipher.isGcmMode() || params.cipher.isOcbMode()) {
+    tag_len = params.length;
     switch (cipher_mode) {
       case kWebCryptoCipherDecrypt: {
-        // If in decrypt mode, the auth tag must be set in the params.tag.
-        CHECK(params.tag);
+        // In decrypt mode, the auth tag is appended to the end of the
+        // ciphertext. Split it off and set it on the cipher context.
+        if (data_len < tag_len) {
+          return WebCryptoCipherStatus::FAILED;
+        }
+        data_len -= tag_len;
 
-        // For OCB mode, we need to set the auth tag length before setting the
-        // tag
         if (params.cipher.isOcbMode()) {
-          if (!ctx.setAeadTagLength(params.tag.size())) {
+          if (!ctx.setAeadTagLength(tag_len)) {
             return WebCryptoCipherStatus::FAILED;
           }
         }
 
         ncrypto::Buffer<const char> buffer = {
-            .data = params.tag.data<char>(),
-            .len = params.tag.size(),
+            .data = in.data<char>() + data_len,
+            .len = tag_len,
         };
         if (!ctx.setAeadTag(buffer)) {
           return WebCryptoCipherStatus::FAILED;
@@ -101,14 +107,6 @@ WebCryptoCipherStatus AES_Cipher(Environment* env,
         break;
       }
       case kWebCryptoCipherEncrypt: {
-        // In encrypt mode, we grab the tag length here. We'll use it to
-        // ensure that that allocated buffer has enough room for both the
-        // final block and the auth tag. Unlike our other AES-GCM implementation
-        // in CipherBase, in WebCrypto, the auth tag is concatenated to the end
-        // of the generated ciphertext and returned in the same ArrayBuffer.
-        tag_len = params.length;
-
-        // For OCB mode, we need to set the auth tag length
         if (params.cipher.isOcbMode()) {
           if (!ctx.setAeadTagLength(tag_len)) {
             return WebCryptoCipherStatus::FAILED;
@@ -122,7 +120,17 @@ WebCryptoCipherStatus AES_Cipher(Environment* env,
   }
 
   size_t total = 0;
-  int buf_len = in.size() + ctx.getBlockSize() + tag_len;
+  const int block_size = ctx.getBlockSize();
+  if (block_size < 0) {
+    return WebCryptoCipherStatus::FAILED;
+  }
+  int buf_len;
+  if (!TryGetIntCipherOutputLength(
+          data_len,
+          static_cast<size_t>(block_size) + (encrypt ? tag_len : 0),
+          &buf_len)) {
+    return WebCryptoCipherStatus::FAILED;
+  }
   int out_len;
 
   ncrypto::Buffer<const unsigned char> buffer = {
@@ -148,9 +156,9 @@ WebCryptoCipherStatus AES_Cipher(Environment* env,
   // Refs: https://github.com/nodejs/node/pull/38913#issuecomment-866505244
   buffer = {
       .data = in.data<unsigned char>(),
-      .len = in.size(),
+      .len = data_len,
   };
-  if (in.empty()) {
+  if (data_len == 0) {
     out_len = 0;
   } else if (!ctx.update(buffer, ptr, &out_len)) {
     return WebCryptoCipherStatus::FAILED;
@@ -158,7 +166,7 @@ WebCryptoCipherStatus AES_Cipher(Environment* env,
 
   total += out_len;
   CHECK_LE(out_len, buf_len);
-  out_len = ctx.getBlockSize();
+  out_len = block_size;
   if (!ctx.update({}, ptr + total, &out_len, true)) {
     return WebCryptoCipherStatus::FAILED;
   }
@@ -185,11 +193,73 @@ WebCryptoCipherStatus AES_Cipher(Environment* env,
   return WebCryptoCipherStatus::OK;
 }
 
+#ifdef OPENSSL_IS_BORINGSSL
+// AES Key Wrap using BoringSSL's low-level AES_wrap_key / AES_unwrap_key.
+// BoringSSL does not expose EVP_aes_*_wrap via the
+// EVP_CIPHER registry, so the EVP-based AES_Cipher path is unusable for
+// AES-KW. This matches Chromium's WebCrypto AES-KW implementation.
+WebCryptoCipherStatus AES_KW_Cipher(Environment* env,
+                                    const KeyObjectData& key_data,
+                                    WebCryptoCipherMode cipher_mode,
+                                    const AESCipherConfig& params,
+                                    const ByteSource& in,
+                                    ByteSource* out) {
+  CHECK_EQ(key_data.GetKeyType(), kKeyTypeSecret);
+
+  const unsigned key_bits =
+      static_cast<unsigned>(key_data.GetSymmetricKeySize()) * 8;
+  const auto key_bytes =
+      reinterpret_cast<const unsigned char*>(key_data.GetSymmetricKey());
+  const bool encrypt = cipher_mode == kWebCryptoCipherEncrypt;
+
+  AES_KEY aes_key;
+  if (encrypt) {
+    // Input must be a multiple of 8 bytes and at least 16 bytes.
+    if (in.size() < 16 || in.size() % 8 != 0) {
+      return WebCryptoCipherStatus::FAILED;
+    }
+    if (AES_set_encrypt_key(key_bytes, key_bits, &aes_key) != 0) {
+      return WebCryptoCipherStatus::FAILED;
+    }
+    auto buf = DataPointer::Alloc(in.size() + 8);
+    int len = AES_wrap_key(&aes_key,
+                           nullptr,
+                           static_cast<unsigned char*>(buf.get()),
+                           in.data<unsigned char>(),
+                           in.size());
+    if (len < 0 || static_cast<size_t>(len) != in.size() + 8) {
+      return WebCryptoCipherStatus::FAILED;
+    }
+    *out = ByteSource::Allocated(buf.release());
+  } else {
+    // Input must be a multiple of 8 bytes and at least 24 bytes.
+    if (in.size() < 24 || in.size() % 8 != 0) {
+      return WebCryptoCipherStatus::FAILED;
+    }
+    if (AES_set_decrypt_key(key_bytes, key_bits, &aes_key) != 0) {
+      return WebCryptoCipherStatus::FAILED;
+    }
+    auto buf = DataPointer::Alloc(in.size() - 8);
+    int len = AES_unwrap_key(&aes_key,
+                             nullptr,
+                             static_cast<unsigned char*>(buf.get()),
+                             in.data<unsigned char>(),
+                             in.size());
+    if (len < 0 || static_cast<size_t>(len) != in.size() - 8) {
+      return WebCryptoCipherStatus::FAILED;
+    }
+    *out = ByteSource::Allocated(buf.release());
+  }
+
+  return WebCryptoCipherStatus::OK;
+}
+#endif  // OPENSSL_IS_BORINGSSL
+
 // The AES_CTR implementation here takes it's inspiration from the chromium
 // implementation here:
 // https://github.com/chromium/chromium/blob/7af6cfd/components/webcrypto/algorithms/aes_ctr.cc
 
-template <typename T>
+template <std::integral T>
 T CeilDiv(T a, T b) {
   return a == 0 ? 0 : 1 + (a - 1) / b;
 }
@@ -314,7 +384,9 @@ WebCryptoCipherStatus AES_CTR_Cipher(Environment* env,
     return status;
   }
 
-  BN_ULONG input_size_part1 = remaining_until_reset.getWord() * kAesBlockSize;
+  std::optional<BN_ULONG> remaining_blocks = remaining_until_reset.getWord();
+  CHECK(remaining_blocks.has_value());
+  BN_ULONG input_size_part1 = remaining_blocks.value() * kAesBlockSize;
 
   // Encrypt the first part...
   auto status =
@@ -360,9 +432,7 @@ bool ValidateIV(
     THROW_ERR_OUT_OF_RANGE(env, "iv is too big");
     return false;
   }
-  params->iv = (mode == kCryptoJobAsync)
-      ? iv.ToCopy()
-      : iv.ToByteSource();
+  params->iv = (IsCryptoJobAsync(mode)) ? iv.ToCopy() : iv.ToByteSource();
   return true;
 }
 
@@ -381,42 +451,17 @@ bool ValidateCounter(
   return true;
 }
 
-bool ValidateAuthTag(
-    Environment* env,
-    CryptoJobMode mode,
-    WebCryptoCipherMode cipher_mode,
-    Local<Value> value,
-    AESCipherConfig* params) {
-  switch (cipher_mode) {
-    case kWebCryptoCipherDecrypt: {
-      if (!IsAnyBufferSource(value)) {
-        THROW_ERR_CRYPTO_INVALID_TAG_LENGTH(env);
-        return false;
-      }
-      ArrayBufferOrViewContents<char> tag_contents(value);
-      if (!tag_contents.CheckSizeInt32()) [[unlikely]] {
-        THROW_ERR_OUT_OF_RANGE(env, "tagLength is too big");
-        return false;
-      }
-      params->tag = mode == kCryptoJobAsync
-          ? tag_contents.ToCopy()
-          : tag_contents.ToByteSource();
-      break;
-    }
-    case kWebCryptoCipherEncrypt: {
-      if (!value->IsUint32()) {
-        THROW_ERR_CRYPTO_INVALID_TAG_LENGTH(env);
-        return false;
-      }
-      params->length = value.As<Uint32>()->Value();
-      if (params->length > 128) {
-        THROW_ERR_CRYPTO_INVALID_TAG_LENGTH(env);
-        return false;
-      }
-      break;
-    }
-    default:
-      UNREACHABLE();
+bool ValidateAuthTag(Environment* env,
+                     Local<Value> value,
+                     AESCipherConfig* params) {
+  if (!value->IsUint32()) {
+    THROW_ERR_CRYPTO_INVALID_TAG_LENGTH(env);
+    return false;
+  }
+  params->length = value.As<Uint32>()->Value();
+  if (params->length > 128) {
+    THROW_ERR_CRYPTO_INVALID_TAG_LENGTH(env);
+    return false;
   }
   return true;
 }
@@ -433,9 +478,9 @@ bool ValidateAdditionalData(
       THROW_ERR_OUT_OF_RANGE(env, "additionalData is too big");
       return false;
     }
-    params->additional_data = mode == kCryptoJobAsync
-        ? additional.ToCopy()
-        : additional.ToByteSource();
+    params->additional_data = IsCryptoJobAsync(mode)
+                                  ? additional.ToCopy()
+                                  : additional.ToByteSource();
   }
   return true;
 }
@@ -446,13 +491,11 @@ void UseDefaultIV(AESCipherConfig* params) {
 }  // namespace
 
 AESCipherConfig::AESCipherConfig(AESCipherConfig&& other) noexcept
-    : mode(other.mode),
-      variant(other.variant),
+    : variant(other.variant),
       cipher(other.cipher),
       length(other.length),
       iv(std::move(other.iv)),
-      additional_data(std::move(other.additional_data)),
-      tag(std::move(other.tag)) {}
+      additional_data(std::move(other.additional_data)) {}
 
 AESCipherConfig& AESCipherConfig::operator=(AESCipherConfig&& other) noexcept {
   if (&other == this) return *this;
@@ -461,13 +504,8 @@ AESCipherConfig& AESCipherConfig::operator=(AESCipherConfig&& other) noexcept {
 }
 
 void AESCipherConfig::MemoryInfo(MemoryTracker* tracker) const {
-  // If mode is sync, then the data in each of these properties
-  // is not owned by the AESCipherConfig, so we ignore it.
-  if (mode == kCryptoJobAsync) {
-    tracker->TrackFieldWithSize("iv", iv.size());
-    tracker->TrackFieldWithSize("additional_data", additional_data.size());
-    tracker->TrackFieldWithSize("tag", tag.size());
-  }
+  tracker->TraitTrackInline(iv, "iv");
+  tracker->TraitTrackInline(additional_data, "additional_data");
 }
 
 Maybe<void> AESCipherTraits::AdditionalConfig(
@@ -477,8 +515,6 @@ Maybe<void> AESCipherTraits::AdditionalConfig(
     WebCryptoCipherMode cipher_mode,
     AESCipherConfig* params) {
   Environment* env = Environment::GetCurrent(args);
-
-  params->mode = mode;
 
   CHECK(args[offset]->IsUint32());  // Key Variant
   params->variant =
@@ -496,6 +532,19 @@ Maybe<void> AESCipherTraits::AdditionalConfig(
   }
 #undef V
 
+#ifdef OPENSSL_IS_BORINGSSL
+  // On BoringSSL the KW variants have no backing EVP_CIPHER; they use
+  // low-level AES_wrap_key / AES_unwrap_key instead.
+  const bool is_kw = params->variant == AESKeyVariant::KW_128 ||
+                     params->variant == AESKeyVariant::KW_192 ||
+                     params->variant == AESKeyVariant::KW_256;
+
+  if (is_kw) {
+    UseDefaultIV(params);
+    return JustVoid();
+  }
+#endif
+
   if (!params->cipher) {
     THROW_ERR_CRYPTO_UNKNOWN_CIPHER(env);
     return Nothing<void>();
@@ -510,7 +559,7 @@ Maybe<void> AESCipherTraits::AdditionalConfig(
         return Nothing<void>();
       }
     } else if (params->cipher.isGcmMode() || params->cipher.isOcbMode()) {
-      if (!ValidateAuthTag(env, mode, cipher_mode, args[offset + 2], params) ||
+      if (!ValidateAuthTag(env, args[offset + 2], params) ||
           !ValidateAdditionalData(env, mode, args[offset + 3], params)) {
         return Nothing<void>();
       }

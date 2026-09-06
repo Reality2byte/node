@@ -294,8 +294,10 @@ Node.js only supports the `type` attribute, for which it supports the following 
 | Attribute `type` | Needed for       |
 | ---------------- | ---------------- |
 | `'json'`         | [JSON modules][] |
+| `'text'`         | [Text modules][] |
 
 The `type: 'json'` attribute is mandatory when importing JSON modules.
+The `type: 'text'` attribute is mandatory when importing text modules.
 
 ## Built-in modules
 
@@ -331,6 +333,12 @@ syncBuiltinESMExports();
 
 fs.readFileSync === readFileSync;
 ```
+
+> When importing built-in modules, all the named exports (i.e. properties of the module exports object)
+> are populated even if they are not individually accessed.
+> This can make initial imports of built-in modules slightly slower compared to loading them with
+> `require()` or `process.getBuiltinModule()`, where the module exports object is evaluated immediately,
+> but some of its properties may only be initialized when first accessed individually.
 
 ## `import()` expressions
 
@@ -563,8 +571,6 @@ console.log(cjs === cjsSugar);
 This Module Namespace Exotic Object can be directly observed either when using
 `import * as m from 'cjs'` or a dynamic import:
 
-<!-- eslint-skip -->
-
 ```js
 import * as m from 'cjs';
 console.log(m);
@@ -621,7 +627,7 @@ always correctly detect named exports. In these cases, using the default
 import form described above can be a better option.
 
 Named exports detection covers many common export patterns, reexport patterns
-and build tool and transpiler outputs. See [cjs-module-lexer][] for the exact
+and build tool and transpiler outputs. See [merve][] for the exact
 semantics implemented.
 
 ### Differences between ES modules and CommonJS
@@ -702,6 +708,23 @@ The imported JSON only exposes a `default` export. There is no support for named
 exports. A cache entry is created in the CommonJS cache to avoid duplication.
 The same object is returned in CommonJS if the JSON module has already been
 imported from the same path.
+
+## Text modules
+
+> Stability: 1.0 - Early development
+
+Text modules are available behind the `--experimental-import-text` flag.
+
+Text files can be referenced by `import`:
+
+```js
+import message from './message.txt' with { type: 'text' };
+```
+
+The `with { type: 'text' }` syntax is mandatory; see [Import Attributes][].
+
+The imported text only exposes a `default` export whose value is the module
+source as a string.
 
 <i id="esm_experimental_wasm_modules"></i>
 
@@ -802,6 +825,15 @@ rather than during instantiation. They do not behave like normal module graph
 imports and they cannot be inspected via `WebAssembly.Module.imports(mod)`
 or virtualized unless recompiling the module using the direct
 `WebAssembly.compile` API with string builtins disabled.
+
+String constants may also be imported from the `wasm:js/string-constants` builtin
+import URL, allowing static JS string globals to be defined:
+
+```text
+(module
+  (import "wasm:js/string-constants" "hello" (global $hello externref))
+)
+```
 
 Importing a module in the source phase before it has been instantiated will also
 use the compile-time builtins automatically:
@@ -927,6 +959,12 @@ The default loader has the following properties
 * Fails on any other URL protocol
 * Fails on unknown extensions for `file:` loading
   (supports only `.cjs`, `.js`, and `.mjs`)
+
+When the [`--experimental-package-map`][] flag is enabled, bare specifier
+resolution first consults the package map configuration. If the importing
+module is within a mapped package and the specifier matches a declared
+dependency, the package map resolution takes precedence. See [Package maps][]
+for details.
 
 ### Resolution algorithm
 
@@ -1096,7 +1134,7 @@ Note: This function is directly invoked by the CommonJS resolution algorithm.
 Note: This function is directly invoked by the CommonJS resolution algorithm.
 
 > 1. Assert: _specifier_ begins with _"#"_.
-> 2. If _specifier_ is exactly equal to _"#"_ or starts with _"#/"_, then
+> 2. If _specifier_ is exactly equal to _"#"_, then
 >    1. Throw an _Invalid Module Specifier_ error.
 > 3. Let _packageURL_ be the result of **LOOKUP\_PACKAGE\_SCOPE**(_parentURL_).
 > 4. If _packageURL_ is not **null**, then
@@ -1268,7 +1306,7 @@ _isImports_, _conditions_)
 >    2. If _source_ contains a top-level lexical declaration (`const`, `let`,
 >       or `class`) of any of the CommonJS wrapper variables (`require`,
 >       `exports`, `module`, `__filename`, or `__dirname`) then return **true**.
-> 3. Else return **false**.
+> 3. Return **false**.
 
 ### Customizing ESM specifier resolution algorithm
 
@@ -1276,7 +1314,7 @@ _isImports_, _conditions_)
 specifier resolution algorithm. An example that provides CommonJS-style
 resolution for ESM specifiers is [commonjs-extension-resolution-loader][].
 
-<!-- Note: The cjs-module-lexer link should be kept in-sync with the deps version -->
+<!-- Note: The merve link should be kept in-sync with the deps version -->
 
 [6.1.7 Array Index]: https://tc39.es/ecma262/#integer-index
 [Addons]: addons.md
@@ -1291,14 +1329,17 @@ resolution for ESM specifiers is [commonjs-extension-resolution-loader][].
 [Loading ECMAScript modules using `require()`]: modules.md#loading-ecmascript-modules-using-require
 [Module customization hooks]: module.md#customization-hooks
 [Node.js Module Resolution And Loading Algorithm]: #resolution-algorithm-specification
+[Package maps]: packages.md#package-maps
 [Source Phase Imports]: https://github.com/tc39/proposal-source-phase-imports
 [Terminology]: #terminology
+[Text modules]: #text-modules
 [URL]: https://url.spec.whatwg.org/
 [WebAssembly JS String Builtins Proposal]: https://github.com/WebAssembly/js-string-builtins
 [`"exports"`]: packages.md#exports
 [`"type"`]: packages.md#type
+[`--experimental-package-map`]: cli.md#--experimental-package-mappath
 [`--input-type`]: cli.md#--input-typetype
-[`data:` URLs]: https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/Data_URIs
+[`data:` URLs]: https://developer.mozilla.org/en-US/docs/Web/URI/Reference/Schemes/data
 [`export`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/export
 [`import()`]: #import-expressions
 [`import.meta.dirname`]: #importmetadirname
@@ -1314,10 +1355,10 @@ resolution for ESM specifiers is [commonjs-extension-resolution-loader][].
 [`process.dlopen`]: process.md#processdlopenmodule-filename-flags
 [`require(esm)`]: modules.md#loading-ecmascript-modules-using-require
 [`url.fileURLToPath()`]: url.md#urlfileurltopathurl-options
-[cjs-module-lexer]: https://github.com/nodejs/cjs-module-lexer/tree/2.0.0
 [commonjs-extension-resolution-loader]: https://github.com/nodejs/loaders-test/tree/main/commonjs-extension-resolution-loader
 [custom https loader]: module.md#import-from-https
 [import.meta.resolve]: #importmetaresolvespecifier
+[merve]: https://github.com/anonrig/merve/tree/v1.0.0
 [percent-encoded]: url.md#percent-encoding-in-urls
 [special scheme]: https://url.spec.whatwg.org/#special-scheme
 [status code]: process.md#exit-codes

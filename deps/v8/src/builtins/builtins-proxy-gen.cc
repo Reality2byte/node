@@ -20,8 +20,8 @@ namespace internal {
 #include "src/codegen/define-code-stub-assembler-macros.inc"
 
 TNode<JSProxy> ProxiesCodeStubAssembler::AllocateProxy(
-    TNode<Context> context, TNode<JSReceiver> target,
-    TNode<JSReceiver> handler) {
+    TNode<Context> context, TNode<JSReceiver> target, TNode<JSReceiver> handler,
+    TNode<Int32T> flags) {
   TVARIABLE(Map, map);
 
   Label callable_target(this), constructor_target(this), none_target(this),
@@ -62,6 +62,11 @@ TNode<JSProxy> ProxiesCodeStubAssembler::AllocateProxy(
   StoreObjectFieldRoot(proxy, JSProxy::kPropertiesOrHashOffset, empty_dict);
   StoreObjectFieldNoWriteBarrier(proxy, JSProxy::kTargetOffset, target);
   StoreObjectFieldNoWriteBarrier(proxy, JSProxy::kHandlerOffset, handler);
+  StoreObjectFieldNoWriteBarrier(proxy, JSProxy::kFlagsOffset, flags);
+#if TAGGED_SIZE_8_BYTES
+  StoreObjectFieldNoWriteBarrier(proxy, JSProxy::kPaddingOffset,
+                                 Int32Constant(0));
+#endif
 
   return CAST(proxy);
 }

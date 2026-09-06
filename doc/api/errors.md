@@ -379,12 +379,16 @@ The location information will be one of:
   represents a call in a user program (using ES module system), or
   its dependencies.
 
-The string representing the stack trace is lazily generated when the
-`error.stack` property is **accessed**.
-
 The number of frames captured by the stack trace is bounded by the smaller of
 `Error.stackTraceLimit` or the number of available frames on the current event
 loop tick.
+
+`error.stack` is a getter/setter for a hidden internal property which is only
+present on builtin `Error` objects (those for which [`Error.isError`][] returns
+true). If `error` is not a builtin error object, then the `error.stack` getter
+will always return `undefined`, and the setter will do nothing. This can occur
+if the accessor is manually invoked with a `this` value that is not a builtin
+error object, such as a {Proxy}.
 
 ## Class: `AssertionError`
 
@@ -703,6 +707,21 @@ by the `node:assert` module.
 An attempt was made to register something that is not a function as an
 `AsyncHooks` callback.
 
+<a id="ERR_ASYNC_LOADER_REQUEST_NEVER_SETTLED"></a>
+
+### `ERR_ASYNC_LOADER_REQUEST_NEVER_SETTLED`
+
+An operation related to module loading is customized by an asynchronous loader
+hook that never settled the promise before the loader thread exits.
+
+<a id="ERR_ASYNC_RESOURCE_DOMAIN_REMOVED"></a>
+
+### `ERR_ASYNC_RESOURCE_DOMAIN_REMOVED`
+
+The `domain` property on `AsyncResource` has been removed. The domain module
+now uses `AsyncLocalStorage` for context propagation instead of `async_hooks`.
+Use `AsyncLocalStorage` instead for context propagation.
+
 <a id="ERR_ASYNC_TYPE"></a>
 
 ### `ERR_ASYNC_TYPE`
@@ -748,12 +767,6 @@ An operation outside the bounds of a `Buffer` was attempted.
 
 An attempt has been made to create a `Buffer` larger than the maximum allowed
 size.
-
-<a id="ERR_CANNOT_WATCH_SIGINT"></a>
-
-### `ERR_CANNOT_WATCH_SIGINT`
-
-Node.js was unable to watch for the `SIGINT` signal.
 
 <a id="ERR_CHILD_CLOSED_BEFORE_REPLY"></a>
 
@@ -923,7 +936,7 @@ be called no more than one time per instance of a `Hash` object.
 
 ### `ERR_CRYPTO_HASH_UPDATE_FAILED`
 
-[`hash.update()`][] failed for any reason. This should rarely, if ever, happen.
+[`hash.update()`][] failed for an unspecified reason.
 
 <a id="ERR_CRYPTO_INCOMPATIBLE_KEY"></a>
 
@@ -1039,6 +1052,16 @@ An invalid key type was provided.
 
 The given crypto key object's type is invalid for the attempted operation.
 
+<a id="ERR_CRYPTO_INVALID_MAC"></a>
+
+### `ERR_CRYPTO_INVALID_MAC`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+An invalid MAC algorithm was specified.
+
 <a id="ERR_CRYPTO_INVALID_MESSAGELEN"></a>
 
 ### `ERR_CRYPTO_INVALID_MESSAGELEN`
@@ -1111,6 +1134,37 @@ added: v24.7.0
 
 Attempted to use KEM operations while Node.js was not compiled with
 OpenSSL with KEM support.
+
+<a id="ERR_CRYPTO_MAC_FINALIZED"></a>
+
+### `ERR_CRYPTO_MAC_FINALIZED`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+An operation was attempted on a `Mac` object after finalization was attempted
+or an underlying MAC update failed.
+
+<a id="ERR_CRYPTO_MAC_NOT_SUPPORTED"></a>
+
+### `ERR_CRYPTO_MAC_NOT_SUPPORTED`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+Node.js was built without support for the OpenSSL `EVP_MAC` API.
+
+<a id="ERR_CRYPTO_MAC_UPDATE_FAILED"></a>
+
+### `ERR_CRYPTO_MAC_UPDATE_FAILED`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+[`mac.update()`][] failed for an unspecified reason.
 
 <a id="ERR_CRYPTO_OPERATION_FAILED"></a>
 
@@ -1321,6 +1375,24 @@ added: v14.0.0
 Used when a feature that is not available
 to the current platform which is running Node.js is used.
 
+<a id="ERR_FFI_CALL_FAILED"></a>
+
+### `ERR_FFI_CALL_FAILED`
+
+A low-level FFI call failed.
+
+<a id="ERR_FFI_INVALID_POINTER"></a>
+
+### `ERR_FFI_INVALID_POINTER`
+
+An invalid pointer was passed to an FFI operation.
+
+<a id="ERR_FFI_LIBRARY_CLOSED"></a>
+
+### `ERR_FFI_LIBRARY_CLOSED`
+
+An operation was attempted on an FFI dynamic library after it was closed.
+
 <a id="ERR_FS_CP_DIR_TO_NON_DIR"></a>
 
 ### `ERR_FS_CP_DIR_TO_NON_DIR`
@@ -1477,7 +1549,7 @@ New HTTP/2 Streams may not be opened after the `Http2Session` has received a
 
 ### `ERR_HTTP2_HEADERS_AFTER_RESPOND`
 
-An additional headers was specified after an HTTP/2 response was initiated.
+Additional headers were specified after an HTTP/2 response was initiated.
 
 <a id="ERR_HTTP2_HEADERS_SENT"></a>
 
@@ -1689,6 +1761,15 @@ Use of the `101` Informational status code is forbidden in HTTP/2.
 An invalid HTTP status code has been specified. Status codes must be an integer
 between `100` and `599` (inclusive).
 
+<a id="ERR_HTTP2_STREAM_ABORTED"></a>
+
+### `ERR_HTTP2_STREAM_ABORTED`
+
+The peer reset the `Http2Stream` with a clean error code (`NGHTTP2_NO_ERROR`
+or `NGHTTP2_CANCEL`) before sending `END_STREAM`, so the readable side will
+not be fully delivered. Mirrors HTTP/1's `ECONNRESET` for a peer-side
+`socket.destroy()`.
+
 <a id="ERR_HTTP2_STREAM_CANCEL"></a>
 
 ### `ERR_HTTP2_STREAM_CANCEL`
@@ -1726,6 +1807,20 @@ added: v15.14.0
 
 The limit of acceptable invalid HTTP/2 protocol frames sent by the peer,
 as specified through the `maxSessionInvalidFrames` option, has been exceeded.
+
+<a id="ERR_HTTP2_TOO_MANY_ORIGINS"></a>
+
+### `ERR_HTTP2_TOO_MANY_ORIGINS`
+
+<!-- YAML
+added:
+ - v26.3.1
+ - v24.17.0
+ - v22.23.0
+-->
+
+The number of uniq origin sent by the server has exceeded the value defined in
+`options.maxOriginSetSize`.
 
 <a id="ERR_HTTP2_TRAILERS_ALREADY_SENT"></a>
 
@@ -2084,13 +2179,6 @@ An invalid `options.protocol` was passed to `http.request()`.
 Both `breakEvalOnSigint` and `eval` options were set in the [`REPL`][] config,
 which is not supported.
 
-<a id="ERR_INVALID_REPL_INPUT"></a>
-
-### `ERR_INVALID_REPL_INPUT`
-
-The input may not be used in the [`REPL`][]. The conditions under which this
-error is used are described in the [`REPL`][] documentation.
-
 <a id="ERR_INVALID_RETURN_PROPERTY"></a>
 
 ### `ERR_INVALID_RETURN_PROPERTY`
@@ -2436,6 +2524,18 @@ OpenSSL crypto support.
 An attempt was made to use features that require [ICU][], but Node.js was not
 compiled with ICU support.
 
+<a id="ERR_NO_TEMPORAL"></a>
+
+### `ERR_NO_TEMPORAL`
+
+<!-- YAML
+added: v26.2.0
+-->
+
+An attempt was made to use features that require [`Temporal`][], but Node.js was not
+compiled with `Temporal` support or it has been disabled in the current environment
+(for example, when running with `--no-harmony-temporal`).
+
 <a id="ERR_NO_TYPESCRIPT"></a>
 
 ### `ERR_NO_TYPESCRIPT`
@@ -2484,6 +2584,83 @@ A given value is out of the accepted range.
 
 The `package.json` [`"imports"`][] field does not define the given internal
 package specifier mapping.
+
+<a id="ERR_PACKAGE_MAP_EXTERNAL_FILE"></a>
+
+### `ERR_PACKAGE_MAP_EXTERNAL_FILE`
+
+<!-- YAML
+added:
+ - v26.4.0
+ - v24.20.0
+-->
+
+A module attempted to resolve a bare specifier using the [package map][], but
+the importing file is not located within any package defined in the map.
+
+```console
+$ node --experimental-package-map=./package-map.json /tmp/script.js
+Error [ERR_PACKAGE_MAP_EXTERNAL_FILE]: Cannot resolve "dep-a" from "/tmp/script.js": file is not within any package defined in /path/to/package-map.json
+```
+
+To fix this error, ensure the importing file is inside one of the package
+directories listed in the package map, or add a new package entry whose `url`
+covers the importing file.
+
+<a id="ERR_PACKAGE_MAP_INVALID"></a>
+
+### `ERR_PACKAGE_MAP_INVALID`
+
+<!-- YAML
+added:
+ - v26.4.0
+ - v24.20.0
+-->
+
+The [package map][] configuration file is invalid. This can occur when:
+
+* The file does not exist at the specified path.
+* The file contains invalid JSON.
+* The file is missing the required `packages` object.
+* A package entry is missing the required `url` field.
+* Two package entries have the same `url` value.
+
+```console
+$ node --experimental-package-map=./missing.json app.js
+Error [ERR_PACKAGE_MAP_INVALID]: Invalid package map at "./missing.json": file not found
+```
+
+<a id="ERR_PACKAGE_MAP_KEY_NOT_FOUND"></a>
+
+### `ERR_PACKAGE_MAP_KEY_NOT_FOUND`
+
+<!-- YAML
+added:
+ - v26.4.0
+ - v24.20.0
+-->
+
+A package's `dependencies` object in the [package map][] references a package
+key that is not defined in the `packages` object.
+
+```json
+{
+  "packages": {
+    "app": {
+      "url": "./app",
+      "dependencies": {
+        "foo": "nonexistent"
+      }
+    }
+  }
+}
+```
+
+In this example, `"nonexistent"` is referenced as a dependency target but not
+defined in `packages`, which will throw this error.
+
+To fix this error, ensure all package keys referenced in `dependencies` values
+are defined in the `packages` object.
 
 <a id="ERR_PACKAGE_PATH_NOT_EXPORTED"></a>
 
@@ -2622,6 +2799,36 @@ added:
 
 Opening a QUIC stream failed.
 
+<a id="ERR_QUIC_STREAM_ABORTED"></a>
+
+### `ERR_QUIC_STREAM_ABORTED`
+
+<!-- YAML
+added:
+ - v26.2.0
+ - v24.20.0
+-->
+
+> Stability: 1 - Experimental
+
+The Node.js error code for a [`QuicError`][] thrown to abort a QUIC stream
+or session with an explicit application or transport error code.
+
+<a id="ERR_QUIC_STREAM_RESET"></a>
+
+### `ERR_QUIC_STREAM_RESET`
+
+<!-- YAML
+added:
+ - v26.2.0
+ - v24.20.0
+-->
+
+> Stability: 1 - Experimental
+
+A QUIC stream was reset by the peer. The error includes the reset code
+provided by the peer.
+
 <a id="ERR_QUIC_TRANSPORT_ERROR"></a>
 
 ### `ERR_QUIC_TRANSPORT_ERROR`
@@ -2654,22 +2861,38 @@ A QUIC session failed because version negotiation is required.
 
 ### `ERR_REQUIRE_ASYNC_MODULE`
 
-> Stability: 1 - Experimental
+<!-- YAML
+changes:
+  - version:
+     - v26.5.0
+     - v24.20.0
+    pr-url: https://github.com/nodejs/node/pull/64260
+    description: Added the `requireStack` and `topLevelAwaitLocations` properties.
+-->
 
-When trying to `require()` a [ES Module][], the module turns out to be asynchronous.
+When trying to `require()` an [ES Module][], the module turns out to be asynchronous.
 That is, it contains top-level await.
 
-To see where the top-level await is, use
-`--experimental-print-required-tla` (this would execute the modules
-before looking for the top-level awaits).
+When uncaught, the flag `--experimental-print-required-tla` prints
+the locations of the top-level awaits in the graph to stderr.
+
+This error has the following additional non-enumerable properties:
+
+* `requireStack` {string\[]} The chain of modules that led to the failing
+  `require()`, starting with the module that required the asynchronous module.
+* `topLevelAwaitLocations` {Object\[]} The locations of the top-level awaits in
+  the graph. Only populated when `--experimental-print-required-tla` is enabled.
+  Each entry has the following properties:
+  * `url` {string} The URL of the module containing the top-level await.
+  * `line` {number} The 1-based line number of the top-level await.
+  * `column` {number} The 1-based column number of the top-level await.
+  * `sourceLine` {string} The source line containing the top-level await.
 
 <a id="ERR_REQUIRE_CYCLE_MODULE"></a>
 
 ### `ERR_REQUIRE_CYCLE_MODULE`
 
-> Stability: 1 - Experimental
-
-When trying to `require()` a [ES Module][], a CommonJS to ESM or ESM to CommonJS edge
+When trying to `require()` an [ES Module][], a CommonJS to ESM or ESM to CommonJS edge
 participates in an immediate cycle.
 This is not allowed because ES Modules cannot be evaluated while they are
 already being evaluated.
@@ -2699,6 +2922,21 @@ An attempt was made to `require()` an [ES Module][].
 This error has been deprecated since `require()` now supports loading synchronous
 ES modules. When `require()` encounters an ES module that contains top-level
 `await`, it will throw [`ERR_REQUIRE_ASYNC_MODULE`][] instead.
+
+<a id="ERR_REQUIRE_ESM_RACE_CONDITION"></a>
+
+### `ERR_REQUIRE_ESM_RACE_CONDITION`
+
+<!-- YAML
+added:
+ - v26.1.0
+ - v24.16.0
+-->
+
+> Stability: 1 - Experimental.
+
+An attempt was made to `require()` an [ES Module][] while another `import()` call
+was already in progress to load it asynchronously.
 
 <a id="ERR_SCRIPT_EXECUTION_INTERRUPTED"></a>
 
@@ -2814,6 +3052,14 @@ disconnected socket.
 
 A call was made and the UDP subsystem was not running.
 
+<a id="ERR_SOCKET_HANDLE_ADOPTED"></a>
+
+### `ERR_SOCKET_HANDLE_ADOPTED`
+
+An operation was attempted on a [`BoundSocket`][] that had already been adopted
+by a [`net.Server`][] or [`net.Socket`][]. Once a bound socket is adopted, its
+`address()` and `close()` methods can no longer be used.
+
 <a id="ERR_SOURCE_MAP_CORRUPT"></a>
 
 ### `ERR_SOURCE_MAP_CORRUPT`
@@ -2874,6 +3120,13 @@ An attempt was made to call [`stream.pipe()`][] on a [`Writable`][] stream.
 
 A stream method was called that cannot complete because the stream was
 destroyed using `stream.destroy()`.
+
+<a id="ERR_STREAM_ITER_MISSING_FLAG"></a>
+
+### `ERR_STREAM_ITER_MISSING_FLAG`
+
+A stream/iter API was used without the `--experimental-stream-iter` CLI flag
+enabled.
 
 <a id="ERR_STREAM_NULL_VALUES"></a>
 
@@ -3019,7 +3272,7 @@ The context must be a `SecureContext`.
 
 ### `ERR_TLS_INVALID_PROTOCOL_METHOD`
 
-The specified  `secureProtocol` method is invalid. It is  either unknown, or
+The specified `secureProtocol` method is invalid. It is either unknown, or
 disabled because it is insecure.
 
 <a id="ERR_TLS_INVALID_PROTOCOL_VERSION"></a>
@@ -3060,6 +3313,13 @@ Failed to set PSK identity hint. Hint may be too long.
 
 An attempt was made to renegotiate TLS on a socket instance with renegotiation
 disabled.
+
+<a id="ERR_TLS_RENEGOTIATION_UNSUPPORTED"></a>
+
+### `ERR_TLS_RENEGOTIATION_UNSUPPORTED`
+
+An attempt was made to renegotiate TLS, but the TLS implementation does not
+support caller-initiated renegotiation.
 
 <a id="ERR_TLS_REQUIRED_SERVER_NAME"></a>
 
@@ -3221,7 +3481,7 @@ import 'package-name'; // supported
 added: v22.6.0
 -->
 
-Type stripping is not supported for files descendent of a `node_modules` directory.
+Type stripping is not supported for files descendant of a `node_modules` directory.
 
 <a id="ERR_UNSUPPORTED_RESOLVE_REQUEST"></a>
 
@@ -3343,6 +3603,14 @@ The WASI instance has already started.
 
 The WASI instance has not been started.
 
+<a id="ERR_WEBASSEMBLY_NOT_SUPPORTED"></a>
+
+### `ERR_WEBASSEMBLY_NOT_SUPPORTED`
+
+A feature requiring WebAssembly was used, but WebAssembly is not supported or
+has been disabled in the current environment (for example, when running with
+`--jitless`).
+
 <a id="ERR_WEBASSEMBLY_RESPONSE"></a>
 
 ### `ERR_WEBASSEMBLY_RESPONSE`
@@ -3353,6 +3621,14 @@ added: v18.1.0
 
 The `Response` that has been passed to `WebAssembly.compileStreaming` or to
 `WebAssembly.instantiateStreaming` is not a valid WebAssembly response.
+
+<a id="ERR_WORKER_HANDLE_NOT_TRANSFERABLE"></a>
+
+### `ERR_WORKER_HANDLE_NOT_TRANSFERABLE`
+
+An attempt was made to transfer a `net.Socket` or `net.Server` to another thread
+via a `worker_threads` `postMessage()` call while it was not in a transferable
+state, for example because it had already started reading or had buffered data.
 
 <a id="ERR_WORKER_INIT_FAILED"></a>
 
@@ -3445,6 +3721,58 @@ All attempts at serializing an uncaught exception from a worker thread failed.
 ### `ERR_WORKER_UNSUPPORTED_OPERATION`
 
 The requested functionality is not supported in worker threads.
+
+<a id="ERR_ZIP_ARCHIVE_TOO_LARGE"></a>
+
+### `ERR_ZIP_ARCHIVE_TOO_LARGE`
+
+An archive-level structure exceeds a limit: the archive comment exceeds the
+65,535-byte encoded length that the ZIP format allows, or the archive's
+central directory is too large to buffer in memory.
+
+<a id="ERR_ZIP_ENTRY_CORRUPT"></a>
+
+### `ERR_ZIP_ENTRY_CORRUPT`
+
+A ZIP archive entry failed CRC-32 verification, or produced more or fewer
+bytes than its declared uncompressed size, while being read.
+
+<a id="ERR_ZIP_ENTRY_NOT_FOUND"></a>
+
+### `ERR_ZIP_ENTRY_NOT_FOUND`
+
+A named entry was requested from a [`ZipFile`][] or [`ZipBuffer`][] that does
+not contain an entry with that name.
+
+<a id="ERR_ZIP_ENTRY_TOO_LARGE"></a>
+
+### `ERR_ZIP_ENTRY_TOO_LARGE`
+
+A ZIP archive entry's declared size exceeds the configured limit, or a
+provided entry name or comment exceeds the 65,535-byte encoded length that
+the ZIP format allows.
+
+<a id="ERR_ZIP_INVALID_ARCHIVE"></a>
+
+### `ERR_ZIP_INVALID_ARCHIVE`
+
+Data that was expected to be a ZIP archive, or a structure within one, is
+missing, out of bounds, or otherwise inconsistent with the ZIP format.
+
+<a id="ERR_ZIP_NOT_WRITABLE"></a>
+
+### `ERR_ZIP_NOT_WRITABLE`
+
+A mutating method (such as `zipFile.addEntry()` or `zipFile.delete()`) was
+called on a [`ZipFile`][] that was not opened with `{ writable: true }`.
+
+<a id="ERR_ZIP_UNSUPPORTED_FEATURE"></a>
+
+### `ERR_ZIP_UNSUPPORTED_FEATURE`
+
+A ZIP archive uses a feature outside of what this implementation supports,
+such as entry encryption, an unsupported compression method, or a multi-disk
+archive.
 
 <a id="ERR_ZLIB_INITIALIZATION_FAILED"></a>
 
@@ -3853,7 +4181,7 @@ removed: v15.0.0
 -->
 
 This error code was replaced by [`ERR_MISSING_TRANSFERABLE_IN_TRANSFER_LIST`][]
-in Node.js v15.0.0, because it is no longer accurate as other types of
+in Node.js 15.0.0, because it is no longer accurate as other types of
 transferable objects also exist now.
 
 <a id="ERR_MISSING_TRANSFERABLE_IN_TRANSFER_LIST"></a>
@@ -4372,19 +4700,25 @@ An error occurred trying to allocate memory. This should never happen.
 [`--force-fips`]: cli.md#--force-fips
 [`--no-addons`]: cli.md#--no-addons
 [`--unhandled-rejections`]: cli.md#--unhandled-rejectionsmode
+[`BoundSocket`]: net.md#class-netboundsocket
 [`Class: assert.AssertionError`]: assert.md#class-assertassertionerror
 [`ERR_INCOMPATIBLE_OPTION_PAIR`]: #err_incompatible_option_pair
 [`ERR_INVALID_ARG_TYPE`]: #err_invalid_arg_type
 [`ERR_MISSING_MESSAGE_PORT_IN_TRANSFER_LIST`]: #err_missing_message_port_in_transfer_list
 [`ERR_MISSING_TRANSFERABLE_IN_TRANSFER_LIST`]: #err_missing_transferable_in_transfer_list
 [`ERR_REQUIRE_ASYNC_MODULE`]: #err_require_async_module
+[`Error.isError`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Error/isError
 [`EventEmitter`]: events.md#class-eventemitter
 [`MessagePort`]: worker_threads.md#class-messageport
 [`Object.getPrototypeOf`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/getPrototypeOf
 [`Object.setPrototypeOf`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/setPrototypeOf
+[`QuicError`]: quic.md#class-quicerror
 [`REPL`]: repl.md
 [`ServerResponse`]: http.md#class-httpserverresponse
+[`Temporal`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal
 [`Writable`]: stream.md#class-streamwritable
+[`ZipBuffer`]: zlib.md#class-zlibzipbuffer
+[`ZipFile`]: zlib.md#class-zlibzipfile
 [`child_process`]: child_process.md
 [`cipher.getAuthTag()`]: crypto.md#ciphergetauthtag
 [`crypto.getDiffieHellman()`]: crypto.md#cryptogetdiffiehellmangroupname
@@ -4412,14 +4746,17 @@ An error occurred trying to allocate memory. This should never happen.
 [`http`]: http.md
 [`https`]: https.md
 [`libuv Error handling`]: https://docs.libuv.org/en/v1.x/errors.html
+[`mac.update()`]: crypto.md#macupdatedata-inputencoding
+[`net.Server`]: net.md#class-netserver
 [`net.Socket.write()`]: net.md#socketwritedata-encoding-callback
+[`net.Socket`]: net.md#class-netsocket
 [`net`]: net.md
 [`new URL(input)`]: url.md#new-urlinput-base
 [`new URLPattern(input)`]: url.md#new-urlpatternstring-baseurl-options
 [`new URLSearchParams(iterable)`]: url.md#new-urlsearchparamsiterable
 [`package.json`]: packages.md#nodejs-packagejson-field-definitions
 [`postMessage()`]: worker_threads.md#portpostmessagevalue-transferlist
-[`postMessageToThread()`]: worker_threads.md#workerpostmessagetothreadthreadid-value-transferlist-timeout
+[`postMessageToThread()`]: worker_threads.md#worker_threadspostmessagetothreadthreadid-value-transferlist-timeout
 [`process.on('exit')`]: process.md#event-exit
 [`process.send()`]: process.md#processsendmessage-sendhandle-options-callback
 [`process.setUncaughtExceptionCaptureCallback()`]: process.md#processsetuncaughtexceptioncapturecallbackfn
@@ -4447,6 +4784,7 @@ An error occurred trying to allocate memory. This should never happen.
 [domains]: domain.md
 [event emitter-based]: events.md#class-eventemitter
 [file descriptors]: https://en.wikipedia.org/wiki/File_descriptor
+[package map]: packages.md#package-maps
 [relative URL]: https://url.spec.whatwg.org/#relative-url-string
 [self-reference a package using its name]: packages.md#self-referencing-a-package-using-its-name
 [special scheme]: https://url.spec.whatwg.org/#special-scheme

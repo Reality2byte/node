@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <climits>  // INT_MAX
 #include <cmath>
+#ifndef NAPI_EXPERIMENTAL
 #define NAPI_EXPERIMENTAL
+#endif
 #include "env-inl.h"
 #include "js_native_api.h"
 #include "js_native_api_v8.h"
@@ -16,7 +18,7 @@
 #define CHECK_TO_NUMBER(env, context, result, src)                             \
   CHECK_TO_TYPE((env), Number, (context), (result), (src), napi_number_expected)
 
-// n-api defines NAPI_AUTO_LENGTH as the indicator that a string
+// Node-API defines NAPI_AUTO_LENGTH as the indicator that a string
 // is null terminated. For V8 the equivalent is -1. The assert
 // validates that our cast of NAPI_AUTO_LENGTH results in -1 as
 // needed by V8.
@@ -223,7 +225,7 @@ inline napi_status V8NameFromPropertyDescriptor(
   return napi_ok;
 }
 
-// convert from n-api property attributes to v8::PropertyAttribute
+// convert from Node-API property attributes to v8::PropertyAttribute
 inline v8::PropertyAttribute V8PropertyAttributesFromDescriptor(
     const napi_property_descriptor* descriptor) {
   unsigned int attribute_flags = v8::PropertyAttribute::None;
@@ -353,8 +355,8 @@ inline napi_status Unwrap(napi_env env,
   auto val = obj->GetPrivate(context, NAPI_PRIVATE_KEY(context, wrapper))
                  .ToLocalChecked();
   RETURN_STATUS_IF_FALSE(env, val->IsExternal(), napi_invalid_arg);
-  Reference* reference =
-      static_cast<v8impl::Reference*>(val.As<v8::External>()->Value());
+  Reference* reference = static_cast<v8impl::Reference*>(
+      val.As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault));
 
   if (result) {
     *result = reference->Data();
@@ -376,11 +378,10 @@ inline napi_status Unwrap(napi_env env,
 
 //=== Function napi_callback wrapper =================================
 
-// Use this data structure to associate callback data with each N-API function
-// exposed to JavaScript. The structure is stored in a v8::External which gets
-// passed into our callback wrapper. This reduces the performance impact of
-// calling through N-API.
-// Ref: benchmark/misc/function_call
+// Use this data structure to associate callback data with each Node-API
+// function exposed to JavaScript. The structure is stored in a v8::External
+// which gets passed into our callback wrapper. This reduces the performance
+// impact of calling through Node-API. Ref: benchmark/misc/function_call
 // Discussion (incl. perf. data): https://github.com/nodejs/node/pull/21072
 class CallbackBundle {
  public:
@@ -394,18 +395,20 @@ class CallbackBundle {
     bundle->cb_data = data;
     bundle->env = env;
 
-    v8::Local<v8::Value> cbdata = v8::External::New(env->isolate, bundle);
+    v8::Local<v8::Value> cbdata = v8::External::New(
+        env->isolate, bundle, v8::kExternalPointerTypeTagDefault);
     ReferenceWithFinalizer::New(
         env, cbdata, 0, ReferenceOwnership::kRuntime, Delete, bundle, nullptr);
     return cbdata;
   }
 
   static CallbackBundle* FromCallbackData(v8::Local<v8::Value> data) {
-    return reinterpret_cast<CallbackBundle*>(data.As<v8::External>()->Value());
+    return reinterpret_cast<CallbackBundle*>(
+        data.As<v8::External>()->Value(v8::kExternalPointerTypeTagDefault));
   }
 
  public:
-  napi_env env;   // Necessary to invoke C++ NAPI callback
+  napi_env env;   // Necessary to invoke C++ Node-API callback
   void* cb_data;  // The user provided callback data
   napi_callback cb;
 
@@ -572,9 +575,11 @@ inline napi_status Wrap(napi_env env,
         env, obj, 0, v8impl::ReferenceOwnership::kRuntime, native_object);
   }
 
-  CHECK(obj->SetPrivate(context,
-                        NAPI_PRIVATE_KEY(context, wrapper),
-                        v8::External::New(env->isolate, reference))
+  CHECK(obj->SetPrivate(
+               context,
+               NAPI_PRIVATE_KEY(context, wrapper),
+               v8::External::New(
+                   env->isolate, reference, v8::kExternalPointerTypeTagDefault))
             .FromJust());
 
   return GET_RETURN_STATUS(env);
@@ -841,7 +846,8 @@ class ExternalWrapper {
  public:
   static v8::Local<v8::External> New(napi_env env, void* data) {
     ExternalWrapper* wrapper = new ExternalWrapper(data);
-    v8::Local<v8::External> external = v8::External::New(env->isolate, wrapper);
+    v8::Local<v8::External> external = v8::External::New(
+        env->isolate, wrapper, v8::kExternalPointerTypeTagDefault);
     wrapper->persistent_.Reset(env->isolate, external);
     wrapper->persistent_.SetWeak(
         wrapper, WeakCallback, v8::WeakCallbackType::kParameter);
@@ -850,7 +856,8 @@ class ExternalWrapper {
   }
 
   static ExternalWrapper* From(v8::Local<v8::External> external) {
-    return static_cast<ExternalWrapper*>(external->Value());
+    return static_cast<ExternalWrapper*>(
+        external->Value(v8::kExternalPointerTypeTagDefault));
   }
 
   void* Data() { return data_; }
@@ -1565,6 +1572,26 @@ napi_status NAPI_CDECL napi_strict_equals(napi_env env,
   return GET_RETURN_STATUS(env);
 }
 
+napi_status NAPI_CDECL node_api_set_prototype(napi_env env,
+                                              napi_value object,
+                                              napi_value value) {
+  NAPI_PREAMBLE(env);
+  CHECK_ARG(env, value);
+
+  v8::Local<v8::Context> context = env->context();
+  v8::Local<v8::Object> obj;
+
+  CHECK_TO_OBJECT(env, context, obj, object);
+
+  v8::Local<v8::Value> val = v8impl::V8LocalValueFromJsValue(value);
+
+  v8::Maybe<bool> set_maybe = obj->SetPrototypeV2(context, val);
+
+  RETURN_STATUS_IF_FALSE_WITH_PREAMBLE(
+      env, set_maybe.FromMaybe(false), napi_generic_failure);
+  return GET_RETURN_STATUS(env);
+}
+
 napi_status NAPI_CDECL napi_get_prototype(napi_env env,
                                           napi_value object,
                                           napi_value* result) {
@@ -1588,6 +1615,50 @@ napi_status NAPI_CDECL napi_create_object(napi_env env, napi_value* result) {
 
   *result = v8impl::JsValueFromV8LocalValue(v8::Object::New(env->isolate));
 
+  return napi_clear_last_error(env);
+}
+
+napi_status NAPI_CDECL
+node_api_create_object_with_properties(napi_env env,
+                                       napi_value prototype_or_null,
+                                       const napi_value* property_names,
+                                       const napi_value* property_values,
+                                       size_t property_count,
+                                       napi_value* result) {
+  CHECK_ENV_NOT_IN_GC(env);
+  CHECK_ARG(env, result);
+
+  if (property_count > 0) {
+    CHECK_ARG(env, property_names);
+    CHECK_ARG(env, property_values);
+  }
+
+  v8::Local<v8::Value> v8_prototype_or_null;
+  if (prototype_or_null == nullptr) {
+    v8_prototype_or_null = v8::Null(env->isolate);
+  } else {
+    v8_prototype_or_null = v8impl::V8LocalValueFromJsValue(prototype_or_null);
+  }
+
+  v8::LocalVector<v8::Name> v8_names(env->isolate, property_count);
+  v8::LocalVector<v8::Value> v8_values(env->isolate, property_count);
+
+  for (size_t i = 0; i < property_count; i++) {
+    v8::Local<v8::Value> name_value =
+        v8impl::V8LocalValueFromJsValue(property_names[i]);
+    RETURN_STATUS_IF_FALSE(env, name_value->IsName(), napi_name_expected);
+    v8_names[i] = name_value.As<v8::Name>();
+    v8_values[i] = v8impl::V8LocalValueFromJsValue(property_values[i]);
+  }
+
+  v8::Local<v8::Object> obj = v8::Object::New(env->isolate,
+                                              v8_prototype_or_null,
+                                              v8_names.data(),
+                                              v8_values.data(),
+                                              property_count);
+
+  RETURN_STATUS_IF_FALSE(env, !obj.IsEmpty(), napi_generic_failure);
+  *result = v8impl::JsValueFromV8LocalValue(obj);
   return napi_clear_last_error(env);
 }
 
@@ -2060,7 +2131,7 @@ napi_status NAPI_CDECL napi_get_null(napi_env env, napi_value* result) {
 
 // Gets all callback info in a single call. (Ugly, but faster.)
 napi_status NAPI_CDECL napi_get_cb_info(
-    napi_env env,               // [in] NAPI environment handle
+    napi_env env,               // [in] Node-API environment handle
     napi_callback_info cbinfo,  // [in] Opaque callback-info handle
     size_t* argc,      // [in-out] Specifies the size of the provided argv array
                        // and receives the actual count of args.
@@ -3069,6 +3140,48 @@ napi_create_external_arraybuffer(napi_env env,
       env, buffer, nullptr, nullptr, nullptr, result, nullptr);
 }
 
+napi_status NAPI_CDECL
+node_api_create_external_sharedarraybuffer(napi_env env,
+                                           void* external_data,
+                                           size_t byte_length,
+                                           node_api_noenv_finalize finalize_cb,
+                                           void* finalize_hint,
+                                           napi_value* result) {
+  NAPI_PREAMBLE(env);
+  CHECK_ARG(env, result);
+#ifdef V8_ENABLE_SANDBOX
+  return napi_set_last_error(env, napi_no_external_buffers_allowed);
+#else
+  struct FinalizerData {
+    void (*cb)(void* external_data, void* finalize_hint);
+    void* hint;
+  };
+  auto deleter = [](void* external_data, size_t length, void* deleter_data) {
+    if (auto fd = static_cast<FinalizerData*>(deleter_data)) {
+      fd->cb(external_data, fd->hint);
+      delete fd;
+    }
+  };
+  FinalizerData* deleter_data = nullptr;
+  if (finalize_cb != nullptr) {
+    deleter_data = new FinalizerData{finalize_cb, finalize_hint};
+  }
+  auto unique_backing_store = v8::SharedArrayBuffer::NewBackingStore(
+      external_data,
+      byte_length,
+      deleter,
+      reinterpret_cast<void*>(deleter_data));
+  CHECK(!!unique_backing_store);  // Cannot fail.
+  auto shared_backing_store =
+      std::shared_ptr<v8::BackingStore>(std::move(unique_backing_store));
+  auto shared_array_buffer =
+      v8::SharedArrayBuffer::New(env->isolate, std::move(shared_backing_store));
+  CHECK_MAYBE_EMPTY(env, shared_array_buffer, napi_generic_failure);
+  *result = v8impl::JsValueFromV8LocalValue(shared_array_buffer);
+  return napi_clear_last_error(env);
+#endif  // V8_ENABLE_SANDBOX
+}
+
 napi_status NAPI_CDECL napi_get_arraybuffer_info(napi_env env,
                                                  napi_value arraybuffer,
                                                  void** data,
@@ -3163,62 +3276,73 @@ napi_status NAPI_CDECL napi_create_typedarray(napi_env env,
   CHECK_ARG(env, result);
 
   v8::Local<v8::Value> value = v8impl::V8LocalValueFromJsValue(arraybuffer);
-  RETURN_STATUS_IF_FALSE(env, value->IsArrayBuffer(), napi_invalid_arg);
+  auto create_typedarray = [&](auto buffer) -> napi_status {
+    v8::Local<v8::TypedArray> typedArray;
 
-  v8::Local<v8::ArrayBuffer> buffer = value.As<v8::ArrayBuffer>();
-  v8::Local<v8::TypedArray> typedArray;
+    switch (type) {
+      case napi_int8_array:
+        CREATE_TYPED_ARRAY(
+            env, Int8Array, 1, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_uint8_array:
+        CREATE_TYPED_ARRAY(
+            env, Uint8Array, 1, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_uint8_clamped_array:
+        CREATE_TYPED_ARRAY(
+            env, Uint8ClampedArray, 1, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_int16_array:
+        CREATE_TYPED_ARRAY(
+            env, Int16Array, 2, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_uint16_array:
+        CREATE_TYPED_ARRAY(
+            env, Uint16Array, 2, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_int32_array:
+        CREATE_TYPED_ARRAY(
+            env, Int32Array, 4, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_uint32_array:
+        CREATE_TYPED_ARRAY(
+            env, Uint32Array, 4, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_float32_array:
+        CREATE_TYPED_ARRAY(
+            env, Float32Array, 4, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_float64_array:
+        CREATE_TYPED_ARRAY(
+            env, Float64Array, 8, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_bigint64_array:
+        CREATE_TYPED_ARRAY(
+            env, BigInt64Array, 8, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_biguint64_array:
+        CREATE_TYPED_ARRAY(
+            env, BigUint64Array, 8, buffer, byte_offset, length, typedArray);
+        break;
+      case napi_float16_array:
+        CREATE_TYPED_ARRAY(
+            env, Float16Array, 2, buffer, byte_offset, length, typedArray);
+        break;
+      default:
+        return napi_set_last_error(env, napi_invalid_arg);
+    }
 
-  switch (type) {
-    case napi_int8_array:
-      CREATE_TYPED_ARRAY(
-          env, Int8Array, 1, buffer, byte_offset, length, typedArray);
-      break;
-    case napi_uint8_array:
-      CREATE_TYPED_ARRAY(
-          env, Uint8Array, 1, buffer, byte_offset, length, typedArray);
-      break;
-    case napi_uint8_clamped_array:
-      CREATE_TYPED_ARRAY(
-          env, Uint8ClampedArray, 1, buffer, byte_offset, length, typedArray);
-      break;
-    case napi_int16_array:
-      CREATE_TYPED_ARRAY(
-          env, Int16Array, 2, buffer, byte_offset, length, typedArray);
-      break;
-    case napi_uint16_array:
-      CREATE_TYPED_ARRAY(
-          env, Uint16Array, 2, buffer, byte_offset, length, typedArray);
-      break;
-    case napi_int32_array:
-      CREATE_TYPED_ARRAY(
-          env, Int32Array, 4, buffer, byte_offset, length, typedArray);
-      break;
-    case napi_uint32_array:
-      CREATE_TYPED_ARRAY(
-          env, Uint32Array, 4, buffer, byte_offset, length, typedArray);
-      break;
-    case napi_float32_array:
-      CREATE_TYPED_ARRAY(
-          env, Float32Array, 4, buffer, byte_offset, length, typedArray);
-      break;
-    case napi_float64_array:
-      CREATE_TYPED_ARRAY(
-          env, Float64Array, 8, buffer, byte_offset, length, typedArray);
-      break;
-    case napi_bigint64_array:
-      CREATE_TYPED_ARRAY(
-          env, BigInt64Array, 8, buffer, byte_offset, length, typedArray);
-      break;
-    case napi_biguint64_array:
-      CREATE_TYPED_ARRAY(
-          env, BigUint64Array, 8, buffer, byte_offset, length, typedArray);
-      break;
-    default:
-      return napi_set_last_error(env, napi_invalid_arg);
+    *result = v8impl::JsValueFromV8LocalValue(typedArray);
+    return GET_RETURN_STATUS(env);
+  };
+
+  if (value->IsArrayBuffer()) {
+    return create_typedarray(value.As<v8::ArrayBuffer>());
+  } else if (value->IsSharedArrayBuffer()) {
+    return create_typedarray(value.As<v8::SharedArrayBuffer>());
+  } else {
+    return napi_set_last_error(env, napi_invalid_arg);
   }
-
-  *result = v8impl::JsValueFromV8LocalValue(typedArray);
-  return GET_RETURN_STATUS(env);
 }
 
 napi_status NAPI_CDECL napi_get_typedarray_info(napi_env env,
@@ -3251,6 +3375,8 @@ napi_status NAPI_CDECL napi_get_typedarray_info(napi_env env,
       *type = napi_int32_array;
     } else if (value->IsUint32Array()) {
       *type = napi_uint32_array;
+    } else if (value->IsFloat16Array()) {
+      *type = napi_float16_array;
     } else if (value->IsFloat32Array()) {
       *type = napi_float32_array;
     } else if (value->IsFloat64Array()) {
@@ -3298,21 +3424,30 @@ napi_status NAPI_CDECL napi_create_dataview(napi_env env,
   CHECK_ARG(env, result);
 
   v8::Local<v8::Value> value = v8impl::V8LocalValueFromJsValue(arraybuffer);
-  RETURN_STATUS_IF_FALSE(env, value->IsArrayBuffer(), napi_invalid_arg);
 
-  v8::Local<v8::ArrayBuffer> buffer = value.As<v8::ArrayBuffer>();
-  if (byte_length + byte_offset > buffer->ByteLength()) {
-    napi_throw_range_error(env,
-                           "ERR_NAPI_INVALID_DATAVIEW_ARGS",
-                           "byte_offset + byte_length should be less than or "
-                           "equal to the size in bytes of the array passed in");
-    return napi_set_last_error(env, napi_pending_exception);
+  auto create_dataview = [&](auto buffer) -> napi_status {
+    if (byte_length + byte_offset > buffer->ByteLength()) {
+      napi_throw_range_error(
+          env,
+          "ERR_NAPI_INVALID_DATAVIEW_ARGS",
+          "byte_offset + byte_length should be less than or "
+          "equal to the size in bytes of the array passed in");
+      return napi_set_last_error(env, napi_pending_exception);
+    }
+
+    v8::Local<v8::DataView> data_view =
+        v8::DataView::New(buffer, byte_offset, byte_length);
+    *result = v8impl::JsValueFromV8LocalValue(data_view);
+    return GET_RETURN_STATUS(env);
+  };
+
+  if (value->IsArrayBuffer()) {
+    return create_dataview(value.As<v8::ArrayBuffer>());
+  } else if (value->IsSharedArrayBuffer()) {
+    return create_dataview(value.As<v8::SharedArrayBuffer>());
+  } else {
+    return napi_set_last_error(env, napi_invalid_arg);
   }
-  v8::Local<v8::DataView> DataView =
-      v8::DataView::New(buffer, byte_offset, byte_length);
-
-  *result = v8impl::JsValueFromV8LocalValue(DataView);
-  return GET_RETURN_STATUS(env);
 }
 
 napi_status NAPI_CDECL napi_is_dataview(napi_env env,

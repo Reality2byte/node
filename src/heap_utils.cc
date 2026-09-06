@@ -57,19 +57,13 @@ class JSGraphJSNode : public EmbedderGraph::Node {
     CHECK(!val.IsEmpty());
   }
 
-  struct Equal {
-    inline bool operator()(JSGraphJSNode* a, JSGraphJSNode* b) const {
-      Local<Data> data_a = a->V8Value();
-      Local<Data> data_b = a->V8Value();
-      if (data_a->IsValue()) {
-        if (!data_b->IsValue()) {
-          return false;
-        }
-        return data_a.As<Value>()->SameValue(data_b.As<Value>());
-      }
-      return data_a == data_b;
+  bool IsSame(Local<Data> other) {
+    Local<Data> value = V8Value();
+    if (value->IsValue() && other->IsValue()) {
+      return value.As<Value>()->SameValue(other.As<Value>());
     }
-  };
+    return value == other;
+  }
 
  private:
   Global<Data> persistent_;
@@ -80,16 +74,19 @@ class JSGraph : public EmbedderGraph {
   explicit JSGraph(Isolate* isolate) : isolate_(isolate) {}
 
   Node* V8Node(const Local<v8::Data>& value) override {
-    std::unique_ptr<JSGraphJSNode> n { new JSGraphJSNode(isolate_, value) };
-    auto it = engine_nodes_.find(n.get());
-    if (it != engine_nodes_.end())
-      return *it;
-    engine_nodes_.insert(n.get());
-    return AddNode(std::unique_ptr<Node>(n.release()));
+    for (JSGraphJSNode* node : engine_nodes_) {
+      if (node->IsSame(value)) {
+        return node;
+      }
+    }
+
+    auto node = std::make_unique<JSGraphJSNode>(isolate_, value);
+    engine_nodes_.push_back(node.get());
+    return AddNode(std::move(node));
   }
 
   Node* V8Node(const Local<v8::Value>& value) override {
-    return V8Node(value.As<v8::Data>());
+    return V8Node(v8::Local<v8::Data>(value));
   }
 
   Node* AddNode(std::unique_ptr<Node> node) override {
@@ -180,6 +177,7 @@ class JSGraph : public EmbedderGraph {
       size_t i = 0;
       size_t j = 0;
       for (const auto& edge : edge_info.second) {
+        HandleScope handle_scope(isolate_);
         Local<Object> to_object = info_objects[edge.second];
         Local<Object> edge_obj = Object::New(isolate_);
         Local<Value> edge_name_value;
@@ -206,7 +204,7 @@ class JSGraph : public EmbedderGraph {
  private:
   Isolate* isolate_;
   std::unordered_set<std::unique_ptr<Node>> nodes_;
-  std::set<JSGraphJSNode*, JSGraphJSNode::Equal> engine_nodes_;
+  std::vector<JSGraphJSNode*> engine_nodes_;
   std::unordered_map<Node*, std::set<std::pair<const char*, Node*>>> edges_;
 };
 
@@ -214,6 +212,11 @@ void BuildEmbedderGraph(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
   JSGraph graph(env->isolate());
   Environment::BuildEmbedderGraph(env->isolate(), &graph, env);
+  // This binding is used only by tests. Include supplied values so tests can
+  // verify that JSGraph returns one graph node for each distinct V8 value.
+  for (int i = 0; i < args.Length(); i++) {
+    graph.V8Node(args[i]);
+  }
   Local<Array> ret;
   if (graph.CreateObject().ToLocal(&ret))
     args.GetReturnValue().Set(ret);
@@ -266,6 +269,11 @@ class HeapSnapshotStream : public AsyncWrap,
                            public StreamBase,
                            public v8::OutputStream {
  public:
+  enum InternalFields {
+    kInternalFieldCount = std::max<uint32_t>(AsyncWrap::kInternalFieldCount,
+                                             StreamBase::kInternalFieldCount),
+  };
+
   HeapSnapshotStream(
       Environment* env,
       HeapSnapshotPointer&& snapshot,
@@ -400,7 +408,7 @@ BaseObjectPtr<AsyncWrap> CreateHeapSnapshotStream(
     Local<FunctionTemplate> os = FunctionTemplate::New(env->isolate());
     os->Inherit(AsyncWrap::GetConstructorTemplate(env));
     Local<ObjectTemplate> ost = os->InstanceTemplate();
-    ost->SetInternalFieldCount(StreamBase::kInternalFieldCount);
+    ost->SetInternalFieldCount(HeapSnapshotStream::kInternalFieldCount);
     os->SetClassName(
         FIXED_ONE_BYTE_STRING(env->isolate(), "HeapSnapshotStream"));
     StreamBase::AddMethods(env, os);

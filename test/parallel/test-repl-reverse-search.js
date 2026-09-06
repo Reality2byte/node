@@ -13,6 +13,8 @@ if (process.env.TERM === 'dumb') {
   common.skip('skipping - dumb terminal');
 }
 
+common.skipIfInspectorDisabled();
+
 common.allowGlobals('aaaa');
 
 const tmpdir = require('../common/tmpdir');
@@ -190,7 +192,6 @@ const tests = [
   {
     env: { NODE_REPL_HISTORY: defaultHistoryPath },
     showEscapeCodes: true,
-    skip: !process.features.inspector,
     checkTotal: true,
     useColors: false,
     test: [
@@ -287,13 +288,7 @@ function runTest() {
   const opts = tests.shift();
   if (!opts) return; // All done
 
-  const { expected, skip } = opts;
-
-  // Test unsupported on platform.
-  if (skip) {
-    setImmediate(runTestWrap, true);
-    return;
-  }
+  const { expected } = opts;
 
   const lastChunks = [];
   let i = 0;
@@ -301,7 +296,7 @@ function runTest() {
   REPL.createInternalRepl(opts.env, {
     input: new ActionStream(),
     output: new stream.Writable({
-      write(chunk, _, next) {
+      write: common.mustCallAtLeast((chunk, _, next) => {
         const output = chunk.toString();
 
         if (!opts.showEscapeCodes &&
@@ -325,19 +320,21 @@ function runTest() {
         }
 
         next();
-      }
+      }),
     }),
     completer: opts.completer,
     prompt,
-    useColors: opts.useColors || false,
+    // Keep syntax highlighting out of the reverse-search transcript. Result
+    // colors are enabled below after readline has been initialized.
+    useColors: false,
     terminal: true
-  }, function(err, repl) {
+  }, common.mustCall((err, repl) => {
     if (err) {
       console.error(`Failed test # ${numtests - tests.length}`);
       throw err;
     }
 
-    repl.once('close', () => {
+    repl.once('close', common.mustCall(() => {
       if (opts.clean)
         cleanupTmpFile();
 
@@ -349,7 +346,12 @@ function runTest() {
       }
 
       setImmediate(runTestWrap, true);
-    });
+    }));
+
+    if (opts.useColors) {
+      repl.useColors = true;
+      repl.writer.options.colors = true;
+    }
 
     if (opts.columns) {
       Object.defineProperty(repl, 'columns', {
@@ -358,7 +360,7 @@ function runTest() {
       });
     }
     repl.inputStream.run(opts.test);
-  });
+  }));
 }
 
 // run the tests

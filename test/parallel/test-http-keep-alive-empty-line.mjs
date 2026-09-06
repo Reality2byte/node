@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
 
-// This test ensures that data like an empty line (`\r\n`) recevied by the
+// This test ensures that data like an empty line (`\r\n`) received by the
 // server after a request, does not reset the keep-alive timeout. See
 // https://github.com/nodejs/node/issues/58140.
 
@@ -11,20 +11,20 @@ const server = createServer({
   connectionsCheckingInterval: 100,
   headersTimeout: 100,
   keepAliveTimeout: 300
-}, (req, res) => {
+}, common.mustCallAtLeast((req, res) => {
   res.writeHead(404);
   res.end();
 
   req.socket.on('close', common.mustCall(() => {
     server.close();
   }));
-});
+}));
 
-server.listen(0, () => {
+server.listen(0, common.mustCall(() => {
   const client = connect({
     host: 'localhost',
     port: server.address().port,
-  }, () => {
+  }, common.mustCall(() => {
     client.write(
       'GET / HTTP/1.1\r\n' +
           'Host: localhost:3000\r\n' +
@@ -36,7 +36,7 @@ server.listen(0, () => {
     let responseReceived = false;
 
     client.setEncoding('utf-8');
-    client.on('data', (chunk) => {
+    client.on('data', common.mustCallAtLeast((chunk) => {
       response += chunk;
 
       // Check if we've received the full header (ending with \r\n\r\n)
@@ -47,9 +47,9 @@ server.listen(0, () => {
         assert.strictEqual(status, '404');
         client.write('\r\n');
       }
-    });
+    }));
     client.on('end', common.mustCall(() => {
       assert.ok(responseReceived);
     }));
-  });
-});
+  }));
+}));

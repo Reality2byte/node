@@ -88,11 +88,6 @@
         'v8_enable_private_mapping_fork_optimization': 0,
       }],
 
-      ['OS in "aix os400"', {
-        'v8_enable_leaptiering': 0,
-      }, {
-        'v8_enable_leaptiering': 1,
-      }],
     ],
 
     # Variables from BUILD.gn
@@ -111,6 +106,9 @@
 
     # Enable compiler warnings when using V8_DEPRECATED apis.
     'v8_deprecation_warnings%': 0,
+
+    # Check that JavaScript execution is disallowed in V8 API interrupts.
+    'v8_disallow_js_in_api_interrupts_is_checked%': 0,
 
     # Enable compiler warnings when using V8_DEPRECATE_SOON apis.
     'v8_imminent_deprecation_warnings%': 0,
@@ -166,6 +164,9 @@
     'v8_enable_pointer_compression_shared_cage%': 0,
     'v8_enable_31bit_smis_on_64bit_arch%': 0,
 
+    # Size of the contiguous read-only space reservation in the shared cage.
+    'v8_contiguous_compressed_ro_space_size_mb%': 16,
+
     # Sets -dV8_SHORT_BUILTIN_CALLS
     'v8_enable_short_builtin_calls%': 0,
 
@@ -202,8 +203,10 @@
     # Use Siphash as added protection against hash flooding attacks.
     'v8_use_siphash%': 0,
 
-    # Use Perfetto (https://perfetto.dev) as the default TracingController. Not
-    # currently implemented.
+    # Enable seeded array index hash.
+    'v8_enable_seeded_array_index_hash%': 1,
+
+    # Use Perfetto (https://perfetto.dev) as the default TracingController.
     'v8_use_perfetto%': 0,
 
     # Enable map packing & unpacking (sets -dV8_MAP_PACKING).
@@ -234,13 +237,12 @@
     # for ARM64.
     'v8_control_flow_integrity%': 0,
 
-    # Enable V8 zone compression experimental feature.
-    # Sets -DV8_COMPRESS_ZONES.
-    'v8_enable_zone_compression%': 0,
-
     # Enable the experimental V8 sandbox.
     # Sets -DV8_ENABLE_SANDBOX.
     'v8_enable_sandbox%': 0,
+
+    # Enable leaptiering
+    'v8_enable_leaptiering%': 1,
 
     # Enable support for external code range relative to the pointer compression
     # cage.
@@ -300,6 +302,10 @@
     # Enable ECMAScript Internationalization API. Enabling this feature will
     # add a dependency on the ICU library.
     'v8_enable_i18n_support%': 1,
+
+    # Enable Temporal API. Enabling this feature will
+    # add a dependency on the temporal_rs library.
+    'v8_enable_temporal_support%': 0,
 
     # Lite mode disables a number of performance optimizations to reduce memory
     # at the cost of performance.
@@ -361,20 +367,21 @@
       ['v8_enable_pointer_compression==1', {
         'defines': ['V8_COMPRESS_POINTERS'],
       }],
-      ['v8_enable_pointer_compression_shared_cage==1', {
-        'defines': ['V8_COMPRESS_POINTERS_IN_SHARED_CAGE'],
+      ['v8_enable_pointer_compression==1 and v8_enable_pointer_compression_shared_cage!=1', {
+        'defines': ['V8_COMPRESS_POINTERS_IN_MULTIPLE_CAGES'],
       }],
-      ['v8_enable_pointer_compression==1 and v8_enable_pointer_compression_shared_cage==0', {
-        'defines': ['V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE'],
+      ['v8_enable_pointer_compression_shared_cage==1', {
+        'defines': [
+          'V8_COMPRESS_POINTERS_IN_SHARED_CAGE',
+          'V8_CONTIGUOUS_COMPRESSED_RO_SPACE',
+          'V8_CONTIGUOUS_COMPRESSED_RO_SPACE_SIZE_MB=<(v8_contiguous_compressed_ro_space_size_mb)',
+        ],
       }],
       ['v8_enable_pointer_compression==1 or v8_enable_31bit_smis_on_64bit_arch==1', {
         'defines': ['V8_31BIT_SMIS_ON_64BIT_ARCH',],
       }],
       ['v8_enable_short_builtin_calls==1', {
         'defines': ['V8_SHORT_BUILTIN_CALLS',],
-      }],
-      ['v8_enable_zone_compression==1', {
-        'defines': ['V8_COMPRESS_ZONES',],
       }],
       ['v8_enable_sandbox==1', {
         'defines': ['V8_ENABLE_SANDBOX',],
@@ -413,11 +420,17 @@
       ['v8_deprecation_warnings==1', {
         'defines': ['V8_DEPRECATION_WARNINGS',],
       }],
+      ['v8_disallow_js_in_api_interrupts_is_checked==1', {
+        'defines': ['V8_DISALLOW_JS_IN_API_INTERRUPTS_IS_CHECKED',],
+      }],
       ['v8_imminent_deprecation_warnings==1', {
         'defines': ['V8_IMMINENT_DEPRECATION_WARNINGS',],
       }],
       ['v8_enable_i18n_support==1', {
         'defines': ['V8_INTL_SUPPORT',],
+      }],
+      ['v8_enable_temporal_support==1', {
+        'defines': ['V8_TEMPORAL_SUPPORT',],
       }],
       # Refs: https://github.com/nodejs/node/pull/23801
       # ['v8_enable_handle_zapping==1', {
@@ -434,6 +447,12 @@
       }],
       ['v8_disable_write_barriers==1', {
         'defines': ['V8_DISABLE_WRITE_BARRIERS',],
+      }, {
+        'configurations': {
+          'Debug': {
+            'defines': ['V8_VERIFY_WRITE_BARRIERS'],
+          },
+        },
       }],
       ['v8_enable_atomic_object_field_writes==1', {
         'defines': ['V8_ATOMIC_OBJECT_FIELD_WRITES',],
@@ -444,6 +463,9 @@
       ['v8_use_siphash==1', {
         'defines': ['V8_USE_SIPHASH',],
       }],
+      ['v8_enable_seeded_array_index_hash==1', {
+        'defines': ['V8_ENABLE_SEEDED_ARRAY_INDEX_HASH',],
+      }],
       ['dcheck_always_on!=0', {
         'defines': ['DEBUG',],
       }, {
@@ -453,7 +475,10 @@
         'defines': ['ENABLE_VERIFY_CSA',],
       }],
       ['v8_use_perfetto==1', {
-        'defines': ['V8_USE_PERFETTO',],
+        'defines': [
+          'V8_USE_PERFETTO',
+          'V8_USE_PERFETTO_SDK',
+        ],
       }],
       ['v8_enable_map_packing==1', {
         'defines': ['V8_MAP_PACKING',],

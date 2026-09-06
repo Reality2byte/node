@@ -5,26 +5,18 @@ const {
   ReadableStreamFrom,
   readableStreamClose,
   fullyReadBody,
-  extractMimeType,
-  utf8DecodeBytes
+  extractMimeType
 } = require('./util')
-const { FormData, setFormDataState } = require('./formdata')
+const { FormData, setFormDataState, getFormDataBoundary } = require('./formdata')
 const { webidl } = require('../webidl')
 const assert = require('node:assert')
 const { isErrored, isDisturbed } = require('node:stream')
-const { isArrayBuffer } = require('node:util/types')
+const { isUint8Array } = require('node:util/types')
 const { serializeAMimeType } = require('./data-url')
 const { multipartFormDataParser } = require('./formdata-parser')
-const { createDeferredPromise } = require('../../util/promise')
-
-let random
-
-try {
-  const crypto = require('node:crypto')
-  random = (max) => crypto.randomInt(0, max)
-} catch {
-  random = (max) => Math.floor(Math.random() * max)
-}
+const { parseJSONFromBytes } = require('../infra')
+const { utf8DecodeBytes } = require('../../encoding')
+const { ReadableStreamTee } = require('node:stream/web')
 
 const textEncoder = new TextEncoder()
 function noop () {}
@@ -48,6 +40,7 @@ const streamRegistry = new FinalizationRegistry((weakRef) => {
 function extractBody (object, keepalive = false) {
   // 1. Let stream be null.
   let stream = null
+  let controller = null
 
   // 2. If object is a ReadableStream object, then set stream to object.
   if (webidl.is.ReadableStream(object)) {
@@ -60,16 +53,11 @@ function extractBody (object, keepalive = false) {
     // 4. Otherwise, set stream to a new ReadableStream object, and set
     //    up stream with byte reading support.
     stream = new ReadableStream({
-      pull (controller) {
-        const buffer = typeof source === 'string' ? textEncoder.encode(source) : source
-
-        if (buffer.byteLength) {
-          controller.enqueue(buffer)
-        }
-
-        queueMicrotask(() => readableStreamClose(controller))
+      pull () {},
+      start (c) {
+        controller = c
       },
-      start () {},
+      cancel () {},
       type: 'bytes'
     })
   }
@@ -111,11 +99,10 @@ function extractBody (object, keepalive = false) {
     // Set type to `application/x-www-form-urlencoded;charset=UTF-8`.
     type = 'application/x-www-form-urlencoded;charset=UTF-8'
   } else if (webidl.is.BufferSource(object)) {
-    source = isArrayBuffer(object)
-      ? new Uint8Array(object.slice())
-      : new Uint8Array(object.buffer.slice(object.byteOffset, object.byteOffset + object.byteLength))
+    // Set source to a copy of the bytes held by object.
+    source = webidl.util.getCopyOfBytesHeldByBufferSource(object)
   } else if (webidl.is.FormData(object)) {
-    const boundary = `----formdata-undici-0${`${random(1e11)}`.padStart(11, '0')}`
+    const boundary = getFormDataBoundary(object)
     const prefix = `--${boundary}\r\nContent-Disposition: form-data`
 
     /*! formdata-polyfill. MIT License. Jimmy Wärting <https://jimmy.warting.se/opensource> */
@@ -216,44 +203,36 @@ function extractBody (object, keepalive = false) {
 
   // 11. If source is a byte sequence, then set action to a
   // step that returns source and length to source’s length.
-  if (typeof source === 'string' || util.isBuffer(source)) {
-    length = Buffer.byteLength(source)
+  if (typeof source === 'string' || isUint8Array(source)) {
+    action = () => {
+      length = typeof source === 'string' ? Buffer.byteLength(source) : source.length
+      return source
+    }
   }
 
-  // 12. If action is non-null, then run these steps in in parallel:
+  // 12. If action is non-null, then run these steps in parallel:
   if (action != null) {
-    // Run action.
-    let iterator
-    stream = new ReadableStream({
-      async start () {
-        iterator = action(object)[Symbol.asyncIterator]()
-      },
-      async pull (controller) {
-        const { value, done } = await iterator.next()
-        if (done) {
-          // When running action is done, close stream.
-          queueMicrotask(() => {
-            controller.close()
-            controller.byobRequest?.respond(0)
-          })
-        } else {
-          // Whenever one or more bytes are available and stream is not errored,
-          // enqueue a Uint8Array wrapping an ArrayBuffer containing the available
-          // bytes into stream.
-          if (!isErrored(stream)) {
-            const buffer = new Uint8Array(value)
-            if (buffer.byteLength) {
-              controller.enqueue(buffer)
-            }
+    ;(async () => {
+      // 1. Run action.
+      const result = action()
+
+      // 2. Whenever one or more bytes are available and stream is not errored,
+      //    enqueue the result of creating a Uint8Array from the available bytes into stream.
+      const iterator = result?.[Symbol.asyncIterator]?.()
+      if (iterator) {
+        for await (const bytes of iterator) {
+          if (isErrored(stream)) break
+          if (bytes.length) {
+            controller.enqueue(new Uint8Array(bytes))
           }
         }
-        return controller.desiredSize > 0
-      },
-      async cancel (reason) {
-        await iterator.return()
-      },
-      type: 'bytes'
-    })
+      } else if (result?.length && !isErrored(stream)) {
+        controller.enqueue(typeof result === 'string' ? textEncoder.encode(result) : new Uint8Array(result))
+      }
+
+      // 3. When running action is done, close stream.
+      queueMicrotask(() => readableStreamClose(controller))
+    })()
   }
 
   // 13. Let body be a body whose stream is stream, source is source,
@@ -301,7 +280,7 @@ function cloneBody (body) {
   // https://fetch.spec.whatwg.org/#concept-body-clone
 
   // 1. Let « out1, out2 » be the result of teeing body’s stream.
-  const { 0: out1, 1: out2 } = body.stream.tee()
+  const { 0: out1, 1: out2 } = ReadableStreamTee?.(body.stream, true) ?? body.stream.tee()
 
   // 2. Set body’s stream to out1.
   body.stream = out1
@@ -414,6 +393,49 @@ function bodyMixinMethods (instance, getInternalState) {
       return consumeBody(this, (bytes) => {
         return new Uint8Array(bytes)
       }, instance, getInternalState)
+    },
+
+    textStream () {
+      const this_ = getInternalState(this)
+
+      // 1. If this is unusable, then throw a TypeError.
+      if (bodyUnusable(this_)) {
+        throw new TypeError('Body is unusable: Body has already been read')
+      }
+
+      // 2. If this’s body is null:
+      if (this_.body == null) {
+        // 2.1. Let emptyStream be a new ReadableStream in this’s relevant realm.
+        // 2.2. Set up emptyStream.
+        /** @type {ReadableStreamDefaultController<any>} */
+        let controller
+        const emptyStream = new ReadableStream({
+          start: (c) => {
+            controller = c
+          },
+          pull: () => Promise.resolve(),
+          cancel: () => Promise.resolve()
+        }, {
+          size: () => 1
+        })
+
+        // 2.3. Close emptyStream.
+        controller.close()
+
+        // 2.4. Return emptyStream.
+        return emptyStream
+      }
+
+      // 3. Let stream be this’s body’s stream.
+      /** @type {ReadableStream} */
+      const stream = this_.body.stream
+
+      // 4. Let decoder be a new TextDecoderStream object in this’s relevant realm.
+      // 5. Set up decoder with UTF-8.
+      const decoder = new TextDecoderStream('UTF-8')
+
+      // 6. Return the result of stream, piped through decoder.
+      return stream.pipeThrough(decoder)
     }
   }
 
@@ -438,20 +460,16 @@ function consumeBody (object, convertBytesToJSValue, instance, getInternalState)
     return Promise.reject(e)
   }
 
-  const state = getInternalState(object)
+  object = getInternalState(object)
 
   // 1. If object is unusable, then return a promise rejected
   //    with a TypeError.
-  if (bodyUnusable(state)) {
+  if (bodyUnusable(object)) {
     return Promise.reject(new TypeError('Body is unusable: Body has already been read'))
   }
 
-  if (state.aborted) {
-    return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
-  }
-
   // 2. Let promise be a new promise.
-  const promise = createDeferredPromise()
+  const promise = Promise.withResolvers()
 
   // 3. Let errorSteps given error be to reject promise with error.
   const errorSteps = promise.reject
@@ -470,14 +488,14 @@ function consumeBody (object, convertBytesToJSValue, instance, getInternalState)
 
   // 5. If object’s body is null, then run successSteps with an
   //    empty byte sequence.
-  if (state.body == null) {
+  if (object.body == null) {
     successSteps(Buffer.allocUnsafe(0))
     return promise.promise
   }
 
   // 6. Otherwise, fully read object’s body given successSteps,
   //    errorSteps, and object’s relevant global object.
-  fullyReadBody(state.body, successSteps, errorSteps)
+  fullyReadBody(object.body, successSteps, errorSteps)
 
   // 7. Return promise.
   return promise.promise
@@ -494,14 +512,6 @@ function bodyUnusable (object) {
   // said to be unusable if its body is non-null and
   // its body’s stream is disturbed or locked.
   return body != null && (body.stream.locked || util.isDisturbed(body.stream))
-}
-
-/**
- * @see https://infra.spec.whatwg.org/#parse-json-bytes-to-a-javascript-value
- * @param {Uint8Array} bytes
- */
-function parseJSONFromBytes (bytes) {
-  return JSON.parse(utf8DecodeBytes(bytes))
 }
 
 /**

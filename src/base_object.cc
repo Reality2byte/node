@@ -45,7 +45,8 @@ BaseObject::~BaseObject() {
 
   {
     HandleScope handle_scope(realm()->isolate());
-    object()->SetAlignedPointerInInternalField(BaseObject::kSlot, nullptr);
+    object()->SetAlignedPointerInInternalField(
+        BaseObject::kSlot, nullptr, EmbedderDataTag::kDefault);
   }
 }
 
@@ -81,15 +82,16 @@ void BaseObject::LazilyInitializedJSTemplateConstructor(
 }
 
 Local<FunctionTemplate> BaseObject::MakeLazilyInitializedJSTemplate(
-    Environment* env) {
-  return MakeLazilyInitializedJSTemplate(env->isolate_data());
+    Environment* env, int internal_field_count) {
+  return MakeLazilyInitializedJSTemplate(env->isolate_data(),
+                                         internal_field_count);
 }
 
 Local<FunctionTemplate> BaseObject::MakeLazilyInitializedJSTemplate(
-    IsolateData* isolate_data) {
+    IsolateData* isolate_data, int internal_field_count) {
   Local<FunctionTemplate> t = NewFunctionTemplate(
       isolate_data->isolate(), LazilyInitializedJSTemplateConstructor);
-  t->InstanceTemplate()->SetInternalFieldCount(BaseObject::kInternalFieldCount);
+  t->InstanceTemplate()->SetInternalFieldCount(internal_field_count);
   return t;
 }
 
@@ -172,10 +174,18 @@ void BaseObjectList::Cleanup() {
   }
 }
 
-void BaseObjectList::MemoryInfo(node::MemoryTracker* tracker) const {
+void BaseObjectList::MemoryInfo(MemoryTracker* tracker) const {
   for (auto bo : *this) {
-    if (bo->IsDoneInitializing()) tracker->Track(bo);
+    if (bo->IsDoneInitializing()) {
+      // TODO(addaleax): Add weak edges instead of no edges once
+      // https://github.com/v8/v8/commit/e37cadf1143a8c5bbe44c0408186b5a26cc23863
+      // is available for us
+      tracker->Track(
+          bo, bo->persistent().IsWeak() ? MemoryTracker::kWeakEdge : nullptr);
+    }
   }
 }
+
+const char* const MemoryTracker::kWeakEdge = "<MemoryTracker::kWeakEdge>";
 
 }  // namespace node

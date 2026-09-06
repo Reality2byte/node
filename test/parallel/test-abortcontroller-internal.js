@@ -2,9 +2,7 @@
 'use strict';
 require('../common');
 
-const {
-  strictEqual,
-} = require('assert');
+const assert = require('assert');
 
 const {
   test,
@@ -30,5 +28,24 @@ test('A weak event listener should not prevent gc', async () => {
 
   await sleep(10);
   globalThis.gc();
-  strictEqual(ref.deref(), undefined);
+  assert.strictEqual(ref.deref(), undefined);
+});
+
+test('two weak listeners with the same retainer should both run on abort', async () => {
+  // Regression test for https://github.com/nodejs/node/issues/63954
+  const ac = new AbortController();
+  let aRan = false;
+  let bRan = false;
+
+  ac.signal.addEventListener('a', () => { aRan = true; }, { [kWeakHandler]: ac });
+  ac.signal.addEventListener('b', () => { bRan = true; }, { [kWeakHandler]: ac });
+
+  await sleep(10);
+  globalThis.gc();
+
+  ac.signal.dispatchEvent(new Event('a'));
+  ac.signal.dispatchEvent(new Event('b'));
+
+  assert.strictEqual(aRan, true);
+  assert.strictEqual(bRan, true);
 });

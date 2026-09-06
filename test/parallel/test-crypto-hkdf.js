@@ -13,7 +13,7 @@ const {
   hkdfSync,
   getHashes
 } = require('crypto');
-const { hasOpenSSL3 } = require('../common/crypto');
+const { hasOpenSSL, isBoringSSL } = require('../common/crypto');
 
 {
   assert.throws(() => hkdf(), {
@@ -120,12 +120,12 @@ const { hasOpenSSL3 } = require('../common/crypto');
 }
 
 const algorithms = [
-  ['sha256', 'secret', 'salt', 'info', 10],
+  ['sha256', '0123456789abcdef', '0123456789abcdef', 'info', 10],
   ['sha256', '', '', '', 10],
   ['sha256', '', 'salt', '', 10],
   ['sha512', 'secret', 'salt', '', 15],
 ];
-if (!hasOpenSSL3 && !process.features.openssl_is_boringssl)
+if (!hasOpenSSL(3) && !isBoringSSL)
   algorithms.push(['whirlpool', 'secret', '', 'info', 20]);
 
 algorithms.forEach(([ hash, secret, salt, info, length ]) => {
@@ -216,11 +216,10 @@ algorithms.forEach(([ hash, secret, salt, info, length ]) => {
 });
 
 
-if (!hasOpenSSL3) {
+if (!hasOpenSSL(3)) {
   const kKnownUnsupported = ['shake128', 'shake256'];
-  getHashes()
-    .filter((hash) => !kKnownUnsupported.includes(hash))
-    .forEach((hash) => {
-      assert(hkdfSync(hash, 'key', 'salt', 'info', 5));
-    });
+  for (const hash of getHashes()) {
+    if (kKnownUnsupported.includes(hash)) continue;
+    assert(hkdfSync(hash, 'key', 'salt', 'info', 5));
+  }
 }

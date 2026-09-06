@@ -61,16 +61,24 @@ changes:
 An [`Agent`][] object for HTTPS similar to [`http.Agent`][]. See
 [`https.request()`][] for more information.
 
+Like `http.Agent`, the `createConnection(options[, callback])` method can be overridden
+to customize how TLS connections are established.
+
+> See [`agent.createConnection()`][] for details on overriding this method,
+> including asynchronous socket creation with a callback.
+
 ### `new Agent([options])`
 
 <!-- YAML
 changes:
   - version:
     - v24.5.0
+    - v22.21.0
     pr-url: https://github.com/nodejs/node/pull/58980
     description: Add support for `proxyEnv`.
   - version:
     - v24.5.0
+    - v22.21.0
     pr-url: https://github.com/nodejs/node/pull/58980
     description: Add support for `defaultPort` and `protocol`.
   - version: v12.5.0
@@ -91,6 +99,10 @@ changes:
     extension).
 
     See [`Session Resumption`][] for information about TLS session reuse.
+
+Requests that specify a custom `checkServerIdentity` option are not eligible
+for connection reuse or TLS session reuse by an `https.Agent`, unless the
+`checkServerIdentity` option was specified when constructing the Agent.
 
 #### Event: `'keylog'`
 
@@ -187,7 +199,7 @@ This method is identical to [`server.listen()`][] from [`net.Server`][].
 
 ### `server.maxHeadersCount`
 
-* Type: {number} **Default:** `2000`
+* Type: {number} **Default:** `1000`
 
 See [`server.maxHeadersCount`][] in the `node:http` module.
 
@@ -415,6 +427,9 @@ a `timeout` of 5 seconds.
 <!-- YAML
 added: v0.3.6
 changes:
+  - version: REPLACEME
+    pr-url: https://github.com/nodejs/node/pull/63966
+    description: The `clientCertEngine` option is runtime deprecated.
   - version:
     - v22.4.0
     - v20.16.0
@@ -736,6 +751,7 @@ statusCode: 200
 [`Agent`]: #class-httpsagent
 [`Session Resumption`]: tls.md#session-resumption
 [`URL`]: url.md#the-whatwg-url-api
+[`agent.createConnection()`]: http.md#agentcreateconnectionoptions-callback
 [`http.Agent(options)`]: http.md#new-agentoptions
 [`http.Agent`]: http.md#class-httpagent
 [`http.ClientRequest`]: http.md#class-httpclientrequest

@@ -67,15 +67,10 @@ source_set("zlib_common_headers") {
   ]
 }
 
-use_arm_neon_optimizations = false
-if ((current_cpu == "arm" || current_cpu == "arm64") &&
-    !(is_win && !is_clang)) {
-  # TODO(ritownsend@google.com): Optimizations temporarily disabled for
-  # Windows on Arm MSVC builds, see http://crbug.com/v8/10012.
-  if (arm_use_neon) {
-    use_arm_neon_optimizations = true
-  }
-}
+# TODO(ritownsend@google.com): Optimizations temporarily disabled for
+# Windows on Arm MSVC builds, see http://crbug.com/v8/10012.
+use_arm_neon_optimizations =
+    (current_cpu == "arm" || current_cpu == "arm64") && !(is_win && !is_clang)
 
 use_x86_x64_optimizations =
     (current_cpu == "x86" || current_cpu == "x64") && !is_ios
@@ -103,10 +98,6 @@ source_set("zlib_adler32_simd") {
       "adler32_simd.c",
       "adler32_simd.h",
     ]
-
-    if (!is_win || is_clang) {
-      cflags = [ "-mssse3" ]
-    }
   }
 
   if (use_arm_neon_optimizations) {
@@ -170,6 +161,15 @@ if (use_arm_neon_optimizations) {
     public_configs = [ ":zlib_arm_crc32_config" ]
 
     public_deps = [ ":zlib_common_headers" ]
+  }
+}
+
+# Enables 64-bit word-at-a-time compare256() in deflate's longest_match() on
+# 64-bit little-endian architectures (x64 and arm64). Follows the same pattern
+# as INFLATE_CHUNK_READ_64LE and DEFLATE_CHUNK_WRITE_64LE below.
+config("zlib_compare256_config") {
+  if (current_cpu == "x64" || current_cpu == "arm64") {
+    defines = [ "DEFLATE_COMPARE256_64LE" ]
   }
 }
 
@@ -239,13 +239,6 @@ source_set("zlib_crc32_simd") {
       "crc32_simd.h",
       "crc_folding.c",
     ]
-
-    if (!is_win || is_clang) {
-      cflags = [
-        "-msse4.2",
-        "-mpclmul",
-      ]
-    }
   }
 
   configs += [ ":zlib_internal_config" ]
@@ -301,6 +294,7 @@ component("zlib") {
   sources = [
     "adler32.c",
     "chromeconf.h",
+    "compare256.h",
     "compress.c",
     "contrib/optimizations/insert_string.h",
     "cpu_features.c",
@@ -367,7 +361,7 @@ component("zlib") {
   configs -= [ "//build/config/compiler:chromium_code" ]
   configs += [ "//build/config/compiler:no_chromium_code" ]
 
-  if (zlib_symbols_visible) {
+  if (is_posix && zlib_symbols_visible) {
     configs -= [ "//build/config/gcc:symbol_visibility_hidden" ]
     configs += [ "//build/config/gcc:symbol_visibility_default" ]
   }
@@ -375,6 +369,7 @@ component("zlib") {
   public_configs = [ ":zlib_config" ]
 
   configs += [
+    ":zlib_compare256_config",
     ":zlib_internal_config",
 
     # Must be after no_chromium_code for warning flags to be ordered correctly.
@@ -419,7 +414,7 @@ static_library("minizip") {
     ]
   }
 
-  if (is_apple || is_android || is_nacl) {
+  if (is_apple || is_android) {
     # Mac, Android and the BSDs don't have fopen64, ftello64, or fseeko64. We
     # use fopen, ftell, and fseek instead on these systems.
     defines = [ "USE_FILE32API" ]
@@ -551,6 +546,7 @@ if (build_with_chromium) {
       "google:compression_utils",
       "google:zip",
       "//base/test:test_support",
+      "//crypto",
       "//testing/gtest",
     ]
 

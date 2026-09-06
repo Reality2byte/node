@@ -22,7 +22,7 @@ const {
 } = require('./mock-symbols')
 const MockClient = require('./mock-client')
 const MockPool = require('./mock-pool')
-const { matchValue, normalizeSearchParams, buildAndValidateMockOptions } = require('./mock-utils')
+const { matchValue, normalizeSearchParams, buildAndValidateMockOptions, normalizeOrigin } = require('./mock-utils')
 const { InvalidArgumentError, UndiciError } = require('../core/errors')
 const Dispatcher = require('../dispatcher/dispatcher')
 const PendingInterceptorsFormatter = require('./pending-interceptors-formatter')
@@ -56,9 +56,9 @@ class MockAgent extends Dispatcher {
   }
 
   get (origin) {
-    const originKey = this[kIgnoreTrailingSlash]
-      ? origin.replace(/\/$/, '')
-      : origin
+    // Normalize origin to handle URL objects and case-insensitive hostnames
+    const normalizedOrigin = normalizeOrigin(origin)
+    const originKey = this[kIgnoreTrailingSlash] ? normalizedOrigin.replace(/\/$/, '') : normalizedOrigin
 
     let dispatcher = this[kMockAgentGet](originKey)
 
@@ -70,14 +70,28 @@ class MockAgent extends Dispatcher {
   }
 
   dispatch (opts, handler) {
+    opts.origin = normalizeOrigin(opts.origin)
+
     // Call MockAgent.get to perform additional setup before dispatching as normal
-    this.get(opts.origin)
+    const mockDispatcher = this.get(opts.origin)
 
     this[kMockAgentAddCallHistoryLog](opts)
 
     const acceptNonStandardSearchParameters = this[kMockAgentAcceptsNonStandardSearchParameters]
 
     const dispatchOpts = { ...opts }
+
+    // Agent keeps HTTP/1.1-only dispatchers under a separate key. Legacy
+    // global dispatcher consumers use that path, so mirror the mock dispatches
+    // before delegating to the internal Agent.
+    if (dispatchOpts.allowH2 === false) {
+      const http1OnlyKey = `${dispatchOpts.origin}#http1-only`
+      if (!this[kClients].has(http1OnlyKey)) {
+        const http1OnlyDispatcher = this[kFactory](dispatchOpts.origin)
+        http1OnlyDispatcher[kDispatches] = mockDispatcher[kDispatches]
+        this[kMockAgentSet](http1OnlyKey, http1OnlyDispatcher)
+      }
+    }
 
     if (acceptNonStandardSearchParameters && dispatchOpts.path) {
       const [path, searchParams] = dispatchOpts.path.split('?')
@@ -165,7 +179,7 @@ class MockAgent extends Dispatcher {
   }
 
   [kMockAgentSet] (origin, dispatcher) {
-    this[kClients].set(origin, { count: 0, dispatcher })
+    this[kClients].set(origin, dispatcher)
   }
 
   [kFactory] (origin) {
@@ -177,9 +191,9 @@ class MockAgent extends Dispatcher {
 
   [kMockAgentGet] (origin) {
     // First check if we can immediately find it
-    const result = this[kClients].get(origin)
-    if (result?.dispatcher) {
-      return result.dispatcher
+    const dispatcher = this[kClients].get(origin)
+    if (dispatcher) {
+      return dispatcher
     }
 
     // If the origin is not a string create a dummy parent pool and return to user
@@ -190,11 +204,11 @@ class MockAgent extends Dispatcher {
     }
 
     // If we match, create a pool and assign the same dispatches
-    for (const [keyMatcher, result] of Array.from(this[kClients])) {
-      if (result && typeof keyMatcher !== 'string' && matchValue(keyMatcher, origin)) {
+    for (const [keyMatcher, nonExplicitDispatcher] of Array.from(this[kClients])) {
+      if (nonExplicitDispatcher && typeof keyMatcher !== 'string' && matchValue(keyMatcher, origin)) {
         const dispatcher = this[kFactory](origin)
         this[kMockAgentSet](origin, dispatcher)
-        dispatcher[kDispatches] = result.dispatcher[kDispatches]
+        dispatcher[kDispatches] = nonExplicitDispatcher[kDispatches]
         return dispatcher
       }
     }
@@ -208,7 +222,7 @@ class MockAgent extends Dispatcher {
     const mockAgentClients = this[kClients]
 
     return Array.from(mockAgentClients.entries())
-      .flatMap(([origin, result]) => result.dispatcher[kDispatches].map(dispatch => ({ ...dispatch, origin })))
+      .flatMap(([origin, dispatcher]) => dispatcher[kDispatches].map(dispatch => ({ ...dispatch, origin })))
       .filter(({ pending }) => pending)
   }
 

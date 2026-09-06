@@ -8,7 +8,6 @@
 #endif
 
 #include "node.h"
-#define NAPI_EXPERIMENTAL
 #include "node_api.h"
 #include "quic/guard.h"
 #include "uv.h"
@@ -37,6 +36,12 @@ static_assert(static_cast<int>(NM_F_LINKED) ==
 #define NODE_BUILTIN_QUIC_BINDINGS(V)
 #endif
 
+#if HAVE_OPENSSL && HAVE_DTLS
+#define NODE_BUILTIN_DTLS_BINDINGS(V) V(dtls)
+#else
+#define NODE_BUILTIN_DTLS_BINDINGS(V)
+#endif
+
 #if HAVE_SQLITE
 #define NODE_BUILTIN_SQLITE_BINDINGS(V)                                        \
   V(sqlite)                                                                    \
@@ -45,11 +50,18 @@ static_assert(static_cast<int>(NM_F_LINKED) ==
 #define NODE_BUILTIN_SQLITE_BINDINGS(V)
 #endif
 
+#if HAVE_FFI
+#define NODE_BUILTIN_FFI_BINDINGS(V) V(ffi)
+#else
+#define NODE_BUILTIN_FFI_BINDINGS(V)
+#endif
+
 #define NODE_BINDINGS_WITH_PER_ISOLATE_INIT(V)                                 \
   V(async_wrap)                                                                \
   V(blob)                                                                      \
   V(builtins)                                                                  \
   V(contextify)                                                                \
+  V(diagnostics_channel)                                                       \
   V(encoding_binding)                                                          \
   V(fs)                                                                        \
   V(fs_dir)                                                                    \
@@ -65,7 +77,8 @@ static_assert(static_cast<int>(NM_F_LINKED) ==
   V(url)                                                                       \
   V(worker)                                                                    \
   NODE_BUILTIN_ICU_BINDINGS(V)                                                 \
-  NODE_BUILTIN_QUIC_BINDINGS(V)
+  NODE_BUILTIN_QUIC_BINDINGS(V)                                                \
+  NODE_BUILTIN_DTLS_BINDINGS(V)
 
 #define NODE_BINDING_CONTEXT_AWARE_CPP(modname, regfunc, priv, flags)          \
   static node::node_module _module = {                                         \
@@ -155,6 +168,7 @@ void CreateInternalBindingTemplates(IsolateData* isolate_data);
 void GetInternalBinding(const v8::FunctionCallbackInfo<v8::Value>& args);
 void GetLinkedBinding(const v8::FunctionCallbackInfo<v8::Value>& args);
 void DLOpen(const v8::FunctionCallbackInfo<v8::Value>& args);
+void DLOpenBinary(const v8::FunctionCallbackInfo<v8::Value>& args);
 
 }  // namespace binding
 

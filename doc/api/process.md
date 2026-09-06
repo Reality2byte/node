@@ -13,6 +13,8 @@ Node.js process.
 import process from 'node:process';
 ```
 
+<!-- eslint-disable no-restricted-syntax -->
+
 ```cjs
 const process = require('node:process');
 ```
@@ -62,8 +64,6 @@ console.log('This message is displayed first.');
 ```
 
 ```cjs
-const process = require('node:process');
-
 process.on('beforeExit', (code) => {
   console.log('Process beforeExit event with code: ', code);
 });
@@ -120,8 +120,6 @@ process.on('exit', (code) => {
 ```
 
 ```cjs
-const process = require('node:process');
-
 process.on('exit', (code) => {
   console.log(`About to exit with code: ${code}`);
 });
@@ -143,8 +141,6 @@ process.on('exit', (code) => {
 ```
 
 ```cjs
-const process = require('node:process');
-
 process.on('exit', (code) => {
   setTimeout(() => {
     console.log('This will not run');
@@ -158,7 +154,7 @@ process.on('exit', (code) => {
 added: v0.5.10
 -->
 
-* `message` { Object | boolean | number | string | null } a parsed JSON object
+* `message` {Object|boolean|number|string|null} a parsed JSON object
   or a serializable primitive value.
 * `sendHandle` {net.Server|net.Socket} a [`net.Server`][] or [`net.Socket`][]
   object, or undefined.
@@ -221,8 +217,6 @@ process.on('rejectionHandled', (promise) => {
 ```
 
 ```cjs
-const process = require('node:process');
-
 const unhandledRejections = new Map();
 process.on('unhandledRejection', (reason, promise) => {
   unhandledRejections.set(promise, reason);
@@ -305,7 +299,6 @@ console.log('This will not run.');
 ```
 
 ```cjs
-const process = require('node:process');
 const fs = require('node:fs');
 
 process.on('uncaughtException', (err, origin) => {
@@ -394,8 +387,6 @@ nonexistentFunc();
 ```
 
 ```cjs
-const process = require('node:process');
-
 process.on('uncaughtExceptionMonitor', (err, origin) => {
   MyMonitoringTool.logSync(err, origin);
 });
@@ -445,8 +436,6 @@ somePromise.then((res) => {
 ```
 
 ```cjs
-const process = require('node:process');
-
 process.on('unhandledRejection', (reason, promise) => {
   console.log('Unhandled Rejection at:', promise, 'reason:', reason);
   // Application specific logging, throwing an error, or other logic here
@@ -473,8 +462,6 @@ const resource = new SomeResource();
 ```
 
 ```cjs
-const process = require('node:process');
-
 function SomeResource() {
   // Initially set the loaded status to a rejected promise
   this.loaded = Promise.reject(new Error('Resource not yet loaded!'));
@@ -526,8 +513,6 @@ process.on('warning', (warning) => {
 ```
 
 ```cjs
-const process = require('node:process');
-
 process.on('warning', (warning) => {
   console.warn(warning.name);    // Print the warning name
   console.warn(warning.message); // Print the warning message
@@ -663,8 +648,6 @@ process.on('SIGTERM', handle);
 ```
 
 ```cjs
-const process = require('node:process');
-
 // Begin reading from stdin so the process does not exit.
 process.stdin.resume();
 
@@ -686,7 +669,8 @@ process.on('SIGTERM', handle);
 * `'SIGTERM'` and `'SIGINT'` have default handlers on non-Windows platforms that
   reset the terminal mode before exiting with code `128 + signal number`. If one
   of these signals has a listener installed, its default behavior will be
-  removed (Node.js will no longer exit).
+  removed. Signal events are emitted asynchronously, so Node.js may exit before
+  the listener is called if the event loop is otherwise empty.
 * `'SIGPIPE'` is ignored by default. It can have a listener installed.
 * `'SIGHUP'` is generated on Windows when the console window is closed, and on
   other platforms under various similar conditions. See signal(7). It can have a
@@ -735,6 +719,43 @@ The `process.abort()` method causes the Node.js process to exit immediately and
 generate a core file.
 
 This feature is not available in [`Worker`][] threads.
+
+## `process.addUncaughtExceptionCaptureCallback(fn)`
+
+<!-- YAML
+added:
+ - v25.9.0
+-->
+
+> Stability: 1 - Experimental
+
+* `fn` {Function}
+
+The `process.addUncaughtExceptionCaptureCallback()` function adds a callback
+that will be invoked when an uncaught exception occurs, receiving the exception
+value as its first argument.
+
+Unlike [`process.setUncaughtExceptionCaptureCallback()`][], this function allows
+multiple callbacks to be registered and does not conflict with the
+[`domain`][] module. Callbacks are called in reverse order of registration
+(most recent first). If a callback returns `true`, subsequent callbacks
+and the default uncaught exception handling are skipped.
+
+```mjs
+import process from 'node:process';
+
+process.addUncaughtExceptionCaptureCallback((err) => {
+  console.error('Caught exception:', err.message);
+  return true; // Indicates exception was handled
+});
+```
+
+```cjs
+process.addUncaughtExceptionCaptureCallback((err) => {
+  console.error('Caught exception:', err.message);
+  return true; // Indicates exception was handled
+});
+```
 
 ## `process.allowedNodeEnvironmentFlags`
 
@@ -834,8 +855,8 @@ added: v0.1.27
 The `process.argv` property returns an array containing the command-line
 arguments passed when the Node.js process was launched. The first element will
 be [`process.execPath`][]. See `process.argv0` if access to the original value
-of `argv[0]` is needed. The second element will be the path to the JavaScript
-file being executed. The remaining elements will be any additional command-line
+of `argv[0]` is needed. If a [program entry point][] was provided, the second element
+will be the absolute path to it. The remaining elements are additional command-line
 arguments.
 
 For example, assuming the following script for `process-args.js`:
@@ -907,7 +928,7 @@ changes:
     description: Change stability index for this feature from Experimental to Stable.
 -->
 
-* Type: {number}
+* Returns: {number}
 
 Gets the amount of free memory that is still available to the process
 (in bytes).
@@ -1018,30 +1039,28 @@ when running the `./configure` script.
 
 An example of the possible output looks like:
 
-<!-- eslint-skip -->
-
-```js
+```json
 {
-  target_defaults:
-   { cflags: [],
-     default_configuration: 'Release',
-     defines: [],
-     include_dirs: [],
-     libraries: [] },
-  variables:
+  "target_defaults":
+   { "cflags": [],
+     "default_configuration": "Release",
+     "defines": [],
+     "include_dirs": [],
+     "libraries": [] },
+  "variables":
    {
-     host_arch: 'x64',
-     napi_build_version: 5,
-     node_install_npm: 'true',
-     node_prefix: '',
-     node_shared_cares: 'false',
-     node_shared_http_parser: 'false',
-     node_shared_libuv: 'false',
-     node_shared_zlib: 'false',
-     node_use_openssl: 'true',
-     node_shared_openssl: 'false',
-     target_arch: 'x64',
-     v8_use_snapshot: 1
+     "host_arch": "x64",
+     "napi_build_version": 5,
+     "node_install_npm": "true",
+     "node_prefix": "",
+     "node_shared_cares": "false",
+     "node_shared_http_parser": "false",
+     "node_shared_libuv": "false",
+     "node_shared_zlib": "false",
+     "node_use_openssl": "true",
+     "node_shared_openssl": "false",
+     "target_arch": "x64",
+     "v8_use_snapshot": 1
    }
 }
 ```
@@ -1081,7 +1100,7 @@ changes:
     description: Aligned return value with `uv_get_constrained_memory`.
 -->
 
-* Type: {number}
+* Returns: {number}
 
 Gets the amount of memory available to the process (in bytes) based on
 limits imposed by the OS. If there is no such constraint, or the constraint
@@ -1179,8 +1198,6 @@ process.debugPort = 5858;
 ```
 
 ```cjs
-const process = require('node:process');
-
 process.debugPort = 5858;
 ```
 
@@ -1317,8 +1334,6 @@ process.on('warning', (warning) => {
 ```
 
 ```cjs
-const process = require('node:process');
-
 process.on('warning', (warning) => {
   console.warn(warning.name);    // 'Warning'
   console.warn(warning.message); // 'Something happened!'
@@ -1410,8 +1425,6 @@ process.on('warning', (warning) => {
 ```
 
 ```cjs
-const process = require('node:process');
-
 process.on('warning', (warning) => {
   console.warn(warning.name);
   console.warn(warning.message);
@@ -1523,20 +1536,18 @@ See environ(7).
 
 An example of this object looks like:
 
-<!-- eslint-skip -->
-
-```js
+```json
 {
-  TERM: 'xterm-256color',
-  SHELL: '/usr/local/bin/bash',
-  USER: 'maciej',
-  PATH: '~/.bin/:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin',
-  PWD: '/Users/maciej',
-  EDITOR: 'vim',
-  SHLVL: '1',
-  HOME: '/Users/maciej',
-  LOGNAME: 'maciej',
-  _: '/usr/local/bin/node'
+  "TERM": "xterm-256color",
+  "SHELL": "/usr/local/bin/bash",
+  "USER": "maciej",
+  "PATH": "~/.bin/:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
+  "PWD": "/Users/maciej",
+  "EDITOR": "vim",
+  "SHLVL": "1",
+  "HOME": "/Users/maciej",
+  "LOGNAME": "maciej",
+  "_": "/usr/local/bin/node"
 }
 ```
 
@@ -1665,10 +1676,8 @@ Results in `process.execArgv`:
 
 And `process.argv`:
 
-<!-- eslint-disable @stylistic/js/semi -->
-
-```js
-['/usr/local/bin/node', 'script.js', '--version']
+```json
+["/usr/local/bin/node", "script.js", "--version"]
 ```
 
 Refer to [`Worker` constructor][] for the detailed behavior of worker
@@ -1685,10 +1694,8 @@ added: v0.1.100
 The `process.execPath` property returns the absolute pathname of the executable
 that started the Node.js process. Symbolic links, if any, are resolved.
 
-<!-- eslint-disable @stylistic/js/semi -->
-
-```js
-'/usr/local/bin/node'
+```json
+"/usr/local/bin/node"
 ```
 
 ## `process.execve(file[, args[, env]])`
@@ -1697,6 +1704,13 @@ that started the Node.js process. Symbolic links, if any, are resolved.
 added:
   - v23.11.0
   - v22.15.0
+changes:
+  - version: v26.1.0
+    pr-url: https://github.com/nodejs/node/pull/62878
+    description: A failed `execve(2)` system call now throws an exception
+                 instead of aborting the process. Native `AtExit`
+                 callbacks registered via the embedder API are no longer
+                 invoked before the `execve(2)` call.
 -->
 
 > Stability: 1 - Experimental
@@ -1713,10 +1727,19 @@ This is achieved by using the `execve` POSIX function and therefore no memory or
 resources from the current process are preserved, except for the standard input,
 standard output and standard error file descriptor.
 
-All other resources are discarded by the system when the processes are swapped, without triggering
-any exit or close events and without running any cleanup handler.
+On success, all other resources are discarded by the system when the
+processes are swapped, without triggering any exit or close events, without
+running any JavaScript cleanup handler (for example `process.on('exit')`),
+and without invoking native `AtExit` callbacks registered through the
+embedder API. Callers that need to run cleanup logic should do so before
+calling `process.execve()`.
 
-This function will never return, unless an error occurred.
+This function does not return on success. If the underlying `execve(2)`
+system call fails, an `Error` is thrown whose `code` property is set to the
+corresponding `errno` string (for example, `'ENOENT'` when `file` does not
+exist), with `syscall` set to `'execve'` and `path` set to `file`. When
+`execve(2)` fails the current process continues to run with its state
+unchanged, so a caller may handle the error and take another action.
 
 This function is not available on Windows or IBM i.
 
@@ -1811,8 +1834,6 @@ if (someConditionNotMet()) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 // How to properly set the exit code while letting
 // the process exit gracefully.
 if (someConditionNotMet()) {
@@ -2001,15 +2022,23 @@ This value is therefore identical to that of `process.features.tls`.
 added:
  - v23.0.0
  - v22.10.0
+changes:
+  - version: v26.0.0
+    pr-url: https://github.com/nodejs/node/pull/61803
+    description: Removed `transform` value.
+  - version:
+      - v25.2.0
+      - v24.12.0
+    pr-url: https://github.com/nodejs/node/pull/60600
+    description: Type stripping is now stable.
 -->
 
 > Stability: 1.2 - Release candidate
 
 * Type: {boolean|string}
 
-A value that is `"strip"` by default,
-`"transform"` if Node.js is run with `--experimental-transform-types`, and `false` if
-Node.js is run with `--no-experimental-strip-types`.
+A value that is `"strip"` by default, and `false` if
+Node.js is run with `--no-strip-types`.
 
 ## `process.features.uv`
 
@@ -2346,8 +2375,6 @@ if (process.getegid) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 if (process.getegid) {
   console.log(`Current gid: ${process.getegid()}`);
 }
@@ -2376,8 +2403,6 @@ if (process.geteuid) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 if (process.geteuid) {
   console.log(`Current uid: ${process.geteuid()}`);
 }
@@ -2406,8 +2431,6 @@ if (process.getgid) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 if (process.getgid) {
   console.log(`Current gid: ${process.getgid()}`);
 }
@@ -2437,8 +2460,6 @@ if (process.getgroups) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 if (process.getgroups) {
   console.log(process.getgroups()); // [ 16, 21, 297 ]
 }
@@ -2467,8 +2488,6 @@ if (process.getuid) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 if (process.getuid) {
   console.log(`Current uid: ${process.getuid()}`);
 }
@@ -2673,8 +2692,6 @@ kill(process.pid, 'SIGHUP');
 ```
 
 ```cjs
-const process = require('node:process');
-
 process.on('SIGHUP', () => {
   console.log('Got SIGHUP signal.');
 });
@@ -2697,7 +2714,9 @@ added:
   - v21.7.0
   - v20.12.0
 changes:
-  - version: REPLACEME
+  - version:
+     - v24.10.0
+     - v22.21.0
     pr-url: https://github.com/nodejs/node/pull/59925
     description: This API is no longer experimental.
 -->
@@ -3110,7 +3129,8 @@ added: v20.0.0
 
 * Type: {Object}
 
-This API is available through the [`--permission`][] flag.
+This API is available through the [`--permission`][] or
+[`--permission-audit`][] flags.
 
 `process.permission` is an object whose methods are used to manage permissions
 for the current process. Additional documentation is available in the
@@ -3131,6 +3151,9 @@ If no reference is provided, a global scope is assumed, for instance,
 `process.permission.has('fs.read')` will check if the process has ALL
 file system read permissions.
 
+In audit mode ([`--permission-audit`][]), this method still returns the actual
+permission status, but denied operations will not throw `ERR_ACCESS_DENIED`.
+
 The reference has a meaning based on the provided scope. For example,
 the reference when the scope is File System means files and folders.
 
@@ -3140,13 +3163,81 @@ The available scopes are:
 * `fs.read` - File System read operations
 * `fs.write` - File System write operations
 * `child` - Child process spawning operations
+* `openssl.store` - Loading keys through OpenSSL STORE loaders
 * `worker` - Worker thread spawning operation
+* `ffi` - Foreign function interface operations
 
 ```js
 // Check if the process has permission to read the README file
 process.permission.has('fs.read', './README.md');
 // Check if the process has read permission operations
 process.permission.has('fs.read');
+```
+
+### `process.permission.drop(scope[, reference])`
+
+<!-- YAML
+added:
+ - v26.3.0
+ - v24.20.0
+-->
+
+> Stability: 1.1 - Active Development
+
+* `scope` {string}
+* `reference` {string}
+
+Drops the specified permission from the current process. This operation is
+**irreversible** — once a permission is dropped, it cannot be restored through
+any Node.js API.
+
+In audit mode ([`--permission-audit`][]), dropping a permission takes effect,
+but since denied operations do not throw, the impact is limited to changing the
+return value of `permission.has()`.
+
+If no reference is provided, the entire scope is dropped. For example,
+`process.permission.drop('fs.read')` will revoke ALL file system read
+permissions.
+
+When a reference is provided, only the permission for that specific resource
+is dropped. For example, `process.permission.drop('fs.read', '/etc/myapp')`
+will revoke read access to that directory while keeping other read
+permissions intact.
+
+**Important:** You can only drop the exact resource that was explicitly
+granted. The reference passed to `drop()` must match the original grant:
+
+* If a permission was granted using a wildcard (`*`), such as
+  `--allow-fs-read=*`, individual paths cannot be dropped - only the entire
+  scope can be dropped (by calling `drop()` without a reference).
+* If a directory was granted (e.g. `--allow-fs-read=/my/folder`), you cannot
+  drop access to individual files inside it. You must drop the same directory
+  that was granted. Any remaining grants continue to apply.
+
+The available scopes are the same as [`process.permission.has()`][]:
+
+* `fs` - All File System (drops both read and write)
+* `fs.read` - File System read operations
+* `fs.write` - File System write operations
+* `child` - Child process spawning operations
+* `openssl.store` - Loading keys through OpenSSL STORE loaders
+* `worker` - Worker thread spawning operation
+* `net` - Network operations
+* `inspector` - Inspector operations
+* `wasi` - WASI operations
+* `addon` - Native addon operations
+
+```js
+const fs = require('node:fs');
+
+// Read configuration during startup
+const config = fs.readFileSync('/etc/myapp/config.json', 'utf8');
+
+// Drop read access to the config directory after initialization
+process.permission.drop('fs.read', '/etc/myapp');
+
+// This will now throw ERR_ACCESS_DENIED
+fs.readFileSync('/etc/myapp/config.json');
 ```
 
 ## `process.pid`
@@ -3204,7 +3295,7 @@ const { platform } = require('node:process');
 console.log(`This platform is ${platform}`);
 ```
 
-The value `'android'` may also be returned if the Node.js is built on the
+The value `'android'` may also be returned if Node.js is built on the
 Android operating system. However, Android support in Node.js
 [is experimental][Android building].
 
@@ -3293,15 +3384,13 @@ tarball.
   * `'Hydrogen'` for the 18.x LTS line beginning with 18.12.0.
     For other LTS Release code names, see [Node.js Changelog Archive](https://github.com/nodejs/node/blob/HEAD/doc/changelogs/CHANGELOG_ARCHIVE.md)
 
-<!-- eslint-skip -->
-
-```js
+```json
 {
-  name: 'node',
-  lts: 'Hydrogen',
-  sourceUrl: 'https://nodejs.org/download/release/v18.12.0/node-v18.12.0.tar.gz',
-  headersUrl: 'https://nodejs.org/download/release/v18.12.0/node-v18.12.0-headers.tar.gz',
-  libUrl: 'https://nodejs.org/download/release/v18.12.0/win-x64/node.lib'
+  "name": "node",
+  "lts": "Hydrogen",
+  "sourceUrl": "https://nodejs.org/download/release/v18.12.0/node-v18.12.0.tar.gz",
+  "headersUrl": "https://nodejs.org/download/release/v18.12.0/node-v18.12.0-headers.tar.gz",
+  "libUrl": "https://nodejs.org/download/release/v18.12.0/win-x64/node.lib"
 }
 ```
 
@@ -3787,8 +3876,6 @@ if (process.getegid && process.setegid) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 if (process.getegid && process.setegid) {
   console.log(`Current gid: ${process.getegid()}`);
   try {
@@ -3832,8 +3919,6 @@ if (process.geteuid && process.seteuid) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 if (process.geteuid && process.seteuid) {
   console.log(`Current uid: ${process.geteuid()}`);
   try {
@@ -3877,8 +3962,6 @@ if (process.getgid && process.setgid) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 if (process.getgid && process.setgid) {
   console.log(`Current gid: ${process.getgid()}`);
   try {
@@ -3922,8 +4005,6 @@ if (process.getgroups && process.setgroups) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 if (process.getgroups && process.setgroups) {
   try {
     process.setgroups([501]);
@@ -3966,8 +4047,6 @@ if (process.getuid && process.setuid) {
 ```
 
 ```cjs
-const process = require('node:process');
-
 if (process.getuid && process.setuid) {
   console.log(`Current uid: ${process.getuid()}`);
   try {
@@ -4011,6 +4090,12 @@ This implies calling `module.setSourceMapsSupport()` with an option
 
 <!-- YAML
 added: v9.3.0
+changes:
+  - version:
+     - v25.9.0
+    pr-url: https://github.com/nodejs/node/pull/61227
+    description: Use `process.addUncaughtExceptionCaptureCallback()` to
+      register multiple callbacks.
 -->
 
 * `fn` {Function|null}
@@ -4030,8 +4115,8 @@ To unset the capture function,
 method with a non-`null` argument while another capture function is set will
 throw an error.
 
-Using this function is mutually exclusive with using the deprecated
-[`domain`][] built-in module.
+To register multiple callbacks that can coexist, use
+[`process.addUncaughtExceptionCaptureCallback()`][] instead.
 
 ## `process.sourceMapsEnabled`
 
@@ -4245,7 +4330,7 @@ When a new value is assigned, different platforms will impose different maximum
 length restrictions on the title. Usually such restrictions are quite limited.
 For instance, on Linux and macOS, `process.title` is limited to the size of the
 binary name plus the length of the command-line arguments because setting the
-`process.title` overwrites the `argv` memory of the process. Node.js v0.8
+`process.title` overwrites the `argv` memory of the process. Node.js 0.8
 allowed for longer process title strings by also overwriting the `environ`
 memory but that was potentially insecure and confusing in some (rather obscure)
 cases.
@@ -4267,6 +4352,29 @@ The `process.traceDeprecation` property indicates whether the
 documentation for the [`'warning'` event][process_warning] and the
 [`emitWarning()` method][process_emit_warning] for more information about this
 flag's behavior.
+
+## `process.traceProcessWarnings`
+
+<!-- YAML
+added: v6.10.0
+-->
+
+* {boolean}
+
+The `process.traceProcessWarnings` property indicates whether the `--trace-warnings` flag
+is set on the current Node.js process. This property allows programmatic control over the
+tracing of warnings, enabling or disabling stack traces for warnings at runtime.
+
+```js
+// Enable trace warnings
+process.traceProcessWarnings = true;
+
+// Emit a warning with a stack trace
+process.emitWarning('Warning with stack trace');
+
+// Disable trace warnings
+process.traceProcessWarnings = false;
+```
 
 ## `process.umask()`
 
@@ -4331,7 +4439,7 @@ added:
 
 > Stability: 1 - Experimental
 
-* `maybeUnfefable` {any} An object that may be "unref'd".
+* `maybeRefable` {any} An object that may be "unref'd".
 
 An object is "unrefable" if it implements the Node.js "Refable protocol".
 Specifically, this means that the object implements the `Symbol.for('nodejs.ref')`
@@ -4418,32 +4526,35 @@ console.log(versions);
 Will generate an object similar to:
 
 ```console
-{ node: '23.0.0',
-  acorn: '8.11.3',
-  ada: '2.7.8',
-  ares: '1.28.1',
-  base64: '0.5.2',
-  brotli: '1.1.0',
-  cjs_module_lexer: '1.2.2',
-  cldr: '45.0',
-  icu: '75.1',
-  llhttp: '9.2.1',
-  modules: '127',
-  napi: '9',
-  nghttp2: '1.61.0',
-  nghttp3: '0.7.0',
-  ngtcp2: '1.3.0',
-  openssl: '3.0.13+quic',
-  simdjson: '3.8.0',
-  simdutf: '5.2.4',
-  sqlite: '3.46.0',
-  tz: '2024a',
-  undici: '6.13.0',
-  unicode: '15.1',
-  uv: '1.48.0',
-  uvwasi: '0.0.20',
-  v8: '12.4.254.14-node.11',
-  zlib: '1.3.0.1-motley-7d77fb7' }
+{ node: '26.0.0-pre',
+  acorn: '8.15.0',
+  ada: '3.4.1',
+  amaro: '1.1.5',
+  ares: '1.34.6',
+  brotli: '1.2.0',
+  merve: '1.0.0',
+  cldr: '48.0',
+  icu: '78.2',
+  llhttp: '9.3.0',
+  modules: '144',
+  napi: '10',
+  nbytes: '0.1.1',
+  ncrypto: '0.0.1',
+  nghttp2: '1.68.0',
+  nghttp3: '',
+  ngtcp2: '',
+  openssl: '3.5.4',
+  simdjson: '4.2.4',
+  simdutf: '7.3.3',
+  sqlite: '3.51.2',
+  tz: '2025c',
+  undici: '7.18.2',
+  unicode: '17.0',
+  uv: '1.51.0',
+  uvwasi: '0.0.23',
+  v8: '14.3.127.18-node.10',
+  zlib: '1.3.1-e00f703',
+  zstd: '1.5.7' }
 ```
 
 ## Exit codes
@@ -4516,6 +4627,7 @@ cases:
 [`'message'`]: child_process.md#event-message
 [`'uncaughtException'`]: #event-uncaughtexception
 [`--no-deprecation`]: cli.md#--no-deprecation
+[`--permission-audit`]: cli.md#--permission-audit
 [`--permission`]: cli.md#--permission
 [`--unhandled-rejections`]: cli.md#--unhandled-rejectionsmode
 [`Buffer`]: buffer.md
@@ -4536,7 +4648,8 @@ cases:
 [`net.Server`]: net.md#class-netserver
 [`net.Socket`]: net.md#class-netsocket
 [`os.constants.dlopen`]: os.md#dlopen-constants
-[`postMessageToThread()`]: worker_threads.md#workerpostmessagetothreadthreadid-value-transferlist-timeout
+[`postMessageToThread()`]: worker_threads.md#worker_threadspostmessagetothreadthreadid-value-transferlist-timeout
+[`process.addUncaughtExceptionCaptureCallback()`]: #processadduncaughtexceptioncapturecallbackfn
 [`process.argv`]: #processargv
 [`process.config`]: #processconfig
 [`process.execPath`]: #processexecpath
@@ -4545,6 +4658,7 @@ cases:
 [`process.hrtime()`]: #processhrtimetime
 [`process.hrtime.bigint()`]: #processhrtimebigint
 [`process.kill()`]: #processkillpid-signal
+[`process.permission.has()`]: #processpermissionhasscope-reference
 [`process.setUncaughtExceptionCaptureCallback()`]: #processsetuncaughtexceptioncapturecallbackfn
 [`promise.catch()`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/catch
 [`queueMicrotask()`]: globals.md#queuemicrotaskcallback
@@ -4563,6 +4677,7 @@ cases:
 [process.cpuUsage]: #processcpuusagepreviousvalue
 [process_emit_warning]: #processemitwarningwarning-type-code-ctor
 [process_warning]: #event-warning
+[program entry point]: https://nodejs.org/api/cli.html#program-entry-point
 [report documentation]: report.md
 [terminal raw mode]: tty.md#readstreamsetrawmodemode
 [uv_get_available_memory]: https://docs.libuv.org/en/v1.x/misc.html#c.uv_get_available_memory

@@ -4,12 +4,13 @@ const { Transform } = require('node:stream')
 const zlib = require('node:zlib')
 const { redirectStatusSet, referrerPolicyTokens, badPortsSet } = require('./constants')
 const { getGlobalOrigin } = require('./global')
-const { collectASequenceOfCodePoints, collectAnHTTPQuotedString, removeChars, parseMIMEType } = require('./data-url')
+const { collectAnHTTPQuotedString, parseMIMEType } = require('./data-url')
 const { performance } = require('node:perf_hooks')
 const { ReadableStreamFrom, isValidHTTPToken, normalizedMethodRecordsBase } = require('../../core/util')
 const assert = require('node:assert')
 const { isUint8Array } = require('node:util/types')
 const { webidl } = require('../webidl')
+const { isomorphicEncode, collectASequenceOfCodePoints, removeChars } = require('../infra')
 
 function responseURL (response) {
   // https://fetch.spec.whatwg.org/#responses
@@ -226,14 +227,19 @@ function TAOCheck () {
   return 'success'
 }
 
+// https://w3c.github.io/webappsec-fetch-metadata/#abstract-opdef-append-the-fetch-metadata-headers-for-a-request
 function appendFetchMetadata (httpRequest) {
+  //  1. If r’s url is not a potentially trustworthy URL, return.
+  if (!isURLPotentiallyTrustworthy(requestCurrentURL(httpRequest))) {
+    return
+  }
+
   //  https://w3c.github.io/webappsec-fetch-metadata/#sec-fetch-dest-header
   //  TODO
 
   //  https://w3c.github.io/webappsec-fetch-metadata/#sec-fetch-mode-header
 
   //  1. Assert: r’s url is a potentially trustworthy URL.
-  //  TODO
 
   //  2. Let header be a Structured Header whose value is a token.
   let header = null
@@ -721,23 +727,6 @@ function normalizeMethod (method) {
   return normalizedMethodRecordsBase[method.toLowerCase()] ?? method
 }
 
-// https://infra.spec.whatwg.org/#serialize-a-javascript-value-to-a-json-string
-function serializeJavascriptValueToJSONString (value) {
-  // 1. Let result be ? Call(%JSON.stringify%, undefined, « value »).
-  const result = JSON.stringify(value)
-
-  // 2. If result is undefined, then throw a TypeError.
-  if (result === undefined) {
-    throw new TypeError('Value is not JSON serializable')
-  }
-
-  // 3. Assert: result is a string.
-  assert(typeof result === 'string')
-
-  // 4. Return result.
-  return result
-}
-
 // https://tc39.es/ecma262/#sec-%25iteratorprototype%25-object
 const esIteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))
 
@@ -993,22 +982,6 @@ function readableStreamClose (controller) {
   }
 }
 
-const invalidIsomorphicEncodeValueRegex = /[^\x00-\xFF]/ // eslint-disable-line
-
-/**
- * @see https://infra.spec.whatwg.org/#isomorphic-encode
- * @param {string} input
- */
-function isomorphicEncode (input) {
-  // 1. Assert: input contains no code points greater than U+00FF.
-  assert(!invalidIsomorphicEncodeValueRegex.test(input))
-
-  // 2. Return a byte sequence whose length is equal to input’s code
-  //    point length and whose bytes have the same values as the
-  //    values of input’s code points, in the same order
-  return input
-}
-
 /**
  * @see https://streams.spec.whatwg.org/#readablestreamdefaultreader-read-all-bytes
  * @see https://streams.spec.whatwg.org/#read-loop
@@ -1227,7 +1200,10 @@ function simpleRangeHeaderValue (value, allowWhitespace) {
   // 18. If rangeStartValue and rangeEndValue are numbers, and rangeStartValue is
   //     greater than rangeEndValue, then return failure.
   // Note: ... when can they not be numbers?
-  if (rangeStartValue > rangeEndValue) {
+  // Note: rangeStartValue or rangeEndValue may be null for open-ended ranges
+  //     such as `bytes=5-` or `bytes=-5`. A null value must not be coerced to 0
+  //     in the comparison, so this check only applies when both are numbers.
+  if (rangeStartValue !== null && rangeEndValue !== null && rangeStartValue > rangeEndValue) {
     return 'failure'
   }
 
@@ -1461,32 +1437,28 @@ function getDecodeSplit (name, list) {
   return gettingDecodingSplitting(value)
 }
 
-const textDecoder = new TextDecoder()
+function hasAuthenticationEntry (request) {
+  return false
+}
 
 /**
- * @see https://encoding.spec.whatwg.org/#utf-8-decode
- * @param {Buffer} buffer
+ * @see https://url.spec.whatwg.org/#include-credentials
+ * @param {URL} url
  */
-function utf8DecodeBytes (buffer) {
-  if (buffer.length === 0) {
-    return ''
-  }
+function includesCredentials (url) {
+  // A URL includes credentials if its username or password is not the empty string.
+  return !!(url.username || url.password)
+}
 
-  // 1. Let buffer be the result of peeking three bytes from
-  //    ioQueue, converted to a byte sequence.
-
-  // 2. If buffer is 0xEF 0xBB 0xBF, then read three
-  //    bytes from ioQueue. (Do nothing with those bytes.)
-  if (buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF) {
-    buffer = buffer.subarray(3)
-  }
-
-  // 3. Process a queue with an instance of UTF-8’s
-  //    decoder, ioQueue, output, and "replacement".
-  const output = textDecoder.decode(buffer)
-
-  // 4. Return output.
-  return output
+/**
+ * @see https://html.spec.whatwg.org/multipage/document-sequences.html#traversable-navigable
+ * @param {object|string} navigable
+ */
+function isTraversableNavigable (navigable) {
+  // Returns true only if we have an actual traversable navigable object
+  // that can prompt the user for credentials. In Node.js, this will always
+  // be false since there's no Window object or navigable.
+  return navigable != null && navigable !== 'client' && navigable !== 'no-traversable'
 }
 
 class EnvironmentSettingsObjectBase {
@@ -1534,7 +1506,6 @@ module.exports = {
   isValidReasonPhrase,
   sameOrigin,
   normalizeMethod,
-  serializeJavascriptValueToJSONString,
   iteratorMixin,
   createIterator,
   isValidHeaderName,
@@ -1542,7 +1513,6 @@ module.exports = {
   isErrorLike,
   fullyReadBody,
   readableStreamClose,
-  isomorphicEncode,
   urlIsLocal,
   urlHasHttpsScheme,
   urlIsHttpHttpsScheme,
@@ -1552,7 +1522,9 @@ module.exports = {
   createInflate,
   extractMimeType,
   getDecodeSplit,
-  utf8DecodeBytes,
   environmentSettingsObject,
-  isOriginIPPotentiallyTrustworthy
+  isOriginIPPotentiallyTrustworthy,
+  hasAuthenticationEntry,
+  includesCredentials,
+  isTraversableNavigable
 }

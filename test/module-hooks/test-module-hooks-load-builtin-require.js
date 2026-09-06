@@ -35,11 +35,16 @@ hook.deregister();
 // the one with the `node:` prefix. The one with the prefix
 // stripped for internal lookups should not get passed into the hooks.
 const schemelessBlockList = new Set([
+  'bench',
+  'bench/reporters',
   'sea',
-  'sqlite',
   'test',
   'test/reporters',
 ]);
+
+if (common.hasSQLite) {
+  schemelessBlockList.add('sqlite');
+}
 
 const testModules = [];
 for (const mod of schemelessBlockList) {

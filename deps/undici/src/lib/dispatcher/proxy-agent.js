@@ -4,9 +4,12 @@ const { kProxy, kClose, kDestroy, kDispatch } = require('../core/symbols')
 const Agent = require('./agent')
 const Pool = require('./pool')
 const DispatcherBase = require('./dispatcher-base')
-const { InvalidArgumentError, RequestAbortedError, SecureProxyConnectionError } = require('../core/errors')
+const { InvalidArgumentError, RequestAbortedError, SecureProxyConnectionError, ProxyConnectionError } = require('../core/errors')
 const buildConnector = require('../core/connect')
 const Client = require('./client')
+const { channels } = require('../core/diagnostics')
+const Socks5ProxyAgent = require('./socks5-proxy-agent')
+const { hasSafeIterator } = require('../core/util')
 
 const kAgent = Symbol('proxy agent')
 const kClient = Symbol('proxy client')
@@ -14,7 +17,9 @@ const kProxyHeaders = Symbol('proxy headers')
 const kRequestTls = Symbol('request tls settings')
 const kProxyTls = Symbol('proxy tls settings')
 const kConnectEndpoint = Symbol('connect endpoint function')
+const kConnectEndpointHTTP1 = Symbol('connect endpoint function (http/1.1 only)')
 const kTunnelProxy = Symbol('tunnel proxy')
+const proxyAuthorization = 'proxy-authorization'
 
 function defaultProtocolPort (protocol) {
   return protocol === 'https:' ? 443 : 80
@@ -33,10 +38,15 @@ function defaultAgentFactory (origin, opts) {
   return new Pool(origin, opts)
 }
 
+function shouldProxyTunnel (requestProtocol, proxyTunnel) {
+  return proxyTunnel === true || requestProtocol !== 'http:'
+}
+
 class Http1ProxyWrapper extends DispatcherBase {
   #client
+  #proxyServername
 
-  constructor (proxyUrl, { headers = {}, connect, factory }) {
+  constructor (proxyUrl, { headers = {}, connect, factory, proxyServername }) {
     if (!proxyUrl) {
       throw new InvalidArgumentError('Proxy URL is mandatory')
     }
@@ -44,6 +54,7 @@ class Http1ProxyWrapper extends DispatcherBase {
     super()
 
     this[kProxyHeaders] = headers
+    this.#proxyServername = proxyServername
     if (factory) {
       this.#client = factory(proxyUrl, { connect })
     } else {
@@ -52,15 +63,15 @@ class Http1ProxyWrapper extends DispatcherBase {
   }
 
   [kDispatch] (opts, handler) {
-    const onHeaders = handler.onHeaders
-    handler.onHeaders = function (statusCode, data, resume) {
+    const onResponseStart = handler.onResponseStart
+    handler.onResponseStart = function (controller, statusCode, data, statusMessage) {
       if (statusCode === 407) {
-        if (typeof handler.onError === 'function') {
-          handler.onError(new InvalidArgumentError('Proxy Authentication Required (407)'))
+        if (typeof handler.onResponseError === 'function') {
+          handler.onResponseError(controller, new InvalidArgumentError('Proxy Authentication Required (407)'))
         }
         return
       }
-      if (onHeaders) onHeaders.call(this, statusCode, data, resume)
+      if (onResponseStart) onResponseStart.call(this, controller, statusCode, data, statusMessage)
     }
 
     // Rewrite request as an HTTP1 Proxy request, without tunneling.
@@ -77,6 +88,13 @@ class Http1ProxyWrapper extends DispatcherBase {
       headers.host = host
     }
     opts.headers = { ...this[kProxyHeaders], ...headers }
+
+    // Pin the SNI/cert hostname to the proxy. Without this the underlying
+    // Client would derive it from the (rewritten) Host header, which points
+    // at the target — wrong for the TLS handshake to the proxy itself.
+    if (this.#proxyServername != null) {
+      opts.servername = this.#proxyServername
+    }
 
     return this.#client[kDispatch](opts, handler)
   }
@@ -101,9 +119,9 @@ class ProxyAgent extends DispatcherBase {
       throw new InvalidArgumentError('Proxy opts.clientFactory must be a function.')
     }
 
-    const { proxyTunnel = true } = opts
+    const { proxyTunnel, connectTimeout } = opts
 
-    super()
+    super(opts)
 
     const url = this.#getUrl(opts)
     const { href, origin, port, protocol, username, password, hostname: proxyHostname } = url
@@ -123,34 +141,80 @@ class ProxyAgent extends DispatcherBase {
       this[kProxyHeaders]['proxy-authorization'] = opts.token
     } else if (username && password) {
       this[kProxyHeaders]['proxy-authorization'] = `Basic ${Buffer.from(`${decodeURIComponent(username)}:${decodeURIComponent(password)}`).toString('base64')}`
+    } else if (username) {
+      this[kProxyHeaders]['proxy-authorization'] = `Basic ${Buffer.from(`${decodeURIComponent(username)}:`).toString('base64')}`
     }
 
-    const connect = buildConnector({ ...opts.proxyTls })
-    this[kConnectEndpoint] = buildConnector({ ...opts.requestTls })
+    const connect = buildConnector({ timeout: connectTimeout, ...opts.proxyTls })
+    const connectHTTP1 = buildConnector({ timeout: connectTimeout, ...opts.proxyTls, allowH2: false })
+    this[kConnectEndpoint] = buildConnector({ timeout: connectTimeout, ...opts.requestTls })
+    this[kConnectEndpointHTTP1] = buildConnector({ timeout: connectTimeout, ...opts.requestTls, allowH2: false })
 
     const agentFactory = opts.factory || defaultAgentFactory
     const factory = (origin, options) => {
       const { protocol } = new URL(origin)
-      if (!this[kTunnelProxy] && protocol === 'http:' && this[kProxy].protocol === 'http:') {
-        return new Http1ProxyWrapper(this[kProxy].uri, {
+
+      // Handle SOCKS5 proxy
+      if (this[kProxy].protocol === 'socks5:' || this[kProxy].protocol === 'socks:') {
+        return new Socks5ProxyAgent(this[kProxy].uri, {
           headers: this[kProxyHeaders],
           connect,
-          factory: agentFactory
+          factory: agentFactory,
+          username: opts.username || username,
+          password: opts.password || password,
+          connectTimeout,
+          proxyTls: opts.proxyTls,
+          requestTls: opts.requestTls
+        })
+      }
+
+      if (!shouldProxyTunnel(protocol, this[kTunnelProxy])) {
+        const forwardConnect = this[kProxy].protocol === 'https:'
+          ? (opts, cb) => connectHTTP1(opts, (err, socket) => {
+              if (err && err.code === 'ERR_TLS_CERT_ALTNAME_INVALID') {
+                cb(new SecureProxyConnectionError(err))
+              } else {
+                cb(err, socket)
+              }
+            })
+          : connectHTTP1
+        return new Http1ProxyWrapper(this[kProxy].uri, {
+          headers: this[kProxyHeaders],
+          connect: forwardConnect,
+          factory: agentFactory,
+          proxyServername: this[kProxy].protocol === 'https:'
+            ? (this[kProxyTls]?.servername || proxyHostname)
+            : undefined
         })
       }
       return agentFactory(origin, options)
     }
-    this[kClient] = clientFactory(url, { connect })
+
+    // For SOCKS5 proxies, we don't need a client to the proxy itself
+    // The SOCKS5 connection is handled within Socks5ProxyAgent
+    if (protocol === 'socks5:' || protocol === 'socks:') {
+      this[kClient] = null
+    } else {
+      this[kClient] = clientFactory(url, { connect })
+    }
+
     this[kAgent] = new Agent({
       ...opts,
       factory,
       connect: async (opts, callback) => {
+        // SOCKS5 proxies handle their own connections via Socks5ProxyAgent,
+        // so this connect function should never be called for them.
+        if (!this[kClient]) {
+          callback(new InvalidArgumentError('Cannot establish tunnel connection without a proxy client'))
+          return
+        }
+
         let requestedPath = opts.host
         if (!opts.port) {
           requestedPath += `:${defaultProtocolPort(opts.protocol)}`
         }
         try {
-          const { socket, statusCode } = await this[kClient].connect({
+          const connectParams = {
             origin,
             port,
             path: requestedPath,
@@ -161,11 +225,21 @@ class ProxyAgent extends DispatcherBase {
               ...(opts.connections == null || opts.connections > 0 ? { 'proxy-connection': 'keep-alive' } : {})
             },
             servername: this[kProxyTls]?.servername || proxyHostname
-          })
+          }
+          const { socket, statusCode } = await this[kClient].connect(connectParams)
           if (statusCode !== 200) {
             socket.on('error', noop).destroy()
             callback(new RequestAbortedError(`Proxy response (${statusCode}) !== 200 when HTTP Tunneling`))
+            return
           }
+
+          if (channels.proxyConnected.hasSubscribers) {
+            channels.proxyConnected.publish({
+              socket,
+              connectParams
+            })
+          }
+
           if (opts.protocol !== 'https:') {
             callback(null, socket)
             return
@@ -176,11 +250,23 @@ class ProxyAgent extends DispatcherBase {
           } else {
             servername = opts.servername
           }
-          this[kConnectEndpoint]({ ...opts, servername, httpSocket: socket }, callback)
+          const connectEndpoint = opts.allowH2 === false
+            ? this[kConnectEndpointHTTP1]
+            : this[kConnectEndpoint]
+
+          connectEndpoint({ ...opts, servername, httpSocket: socket }, callback)
         } catch (err) {
           if (err.code === 'ERR_TLS_CERT_ALTNAME_INVALID') {
             // Throw a custom error to avoid loop in client.js#connect
             callback(new SecureProxyConnectionError(err))
+          } else if (err.code === 'UND_ERR_SOCKET') {
+            // A socket failure while establishing the tunnel means the CONNECT
+            // never completed, so there is nothing to recover - the proxy just
+            // tore down the connection. client.js#onError treats UND_ERR_SOCKET
+            // as a recoverable error on an established connection and leaves the
+            // request queued, which makes connect() retry forever. Surface it as
+            // a non-recoverable proxy error so the request fails instead. (#3897)
+            callback(new ProxyConnectionError(err))
           } else {
             callback(err)
           }
@@ -222,17 +308,19 @@ class ProxyAgent extends DispatcherBase {
   }
 
   [kClose] () {
-    return Promise.all([
-      this[kAgent].close(),
-      this[kClient].close()
-    ])
+    const promises = [this[kAgent].close()]
+    if (this[kClient]) {
+      promises.push(this[kClient].close())
+    }
+    return Promise.all(promises)
   }
 
   [kDestroy] () {
-    return Promise.all([
-      this[kAgent].destroy(),
-      this[kClient].destroy()
-    ])
+    const promises = [this[kAgent].destroy()]
+    if (this[kClient]) {
+      promises.push(this[kClient].destroy())
+    }
+    return Promise.all(promises)
   }
 }
 
@@ -248,7 +336,26 @@ function buildHeaders (headers) {
     const headersPair = {}
 
     for (let i = 0; i < headers.length; i += 2) {
+      if (isProxyAuthorizationHeader(headers[i])) {
+        throwProxyAuthError()
+      }
+
       headersPair[headers[i]] = headers[i + 1]
+    }
+
+    return headersPair
+  }
+
+  // Materialize iterable header containers (e.g. Map, Headers) into a record so
+  // that throwIfProxyAuthIsSent() can inspect their entries. Object.keys and
+  // for...in see nothing on a Map/Headers instance, so without this the
+  // Proxy-Authorization guard is bypassed and proxy credentials can reach the
+  // origin server (GHSA-6cv7-626c-qhqw).
+  if (headers && typeof headers === 'object' && hasSafeIterator(headers)) {
+    const headersPair = {}
+
+    for (const [key, value] of headers) {
+      headersPair[key] = value
     }
 
     return headersPair
@@ -266,11 +373,23 @@ function buildHeaders (headers) {
  * It should be removed in the next major version for performance reasons
  */
 function throwIfProxyAuthIsSent (headers) {
-  const existProxyAuth = headers && Object.keys(headers)
-    .find((key) => key.toLowerCase() === 'proxy-authorization')
-  if (existProxyAuth) {
-    throw new InvalidArgumentError('Proxy-Authorization should be sent in ProxyAgent constructor')
+  for (const key in headers) {
+    if (isProxyAuthorizationHeader(key)) {
+      throwProxyAuthError()
+    }
   }
+}
+
+/**
+ * @param {string} key
+ * @returns {boolean}
+ */
+function isProxyAuthorizationHeader (key) {
+  return key.length === proxyAuthorization.length && key.toLowerCase() === proxyAuthorization
+}
+
+function throwProxyAuthError () {
+  throw new InvalidArgumentError('Proxy-Authorization should be sent in ProxyAgent constructor')
 }
 
 module.exports = ProxyAgent

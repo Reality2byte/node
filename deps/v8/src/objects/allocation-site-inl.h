@@ -24,8 +24,6 @@ namespace internal {
 
 #include "torque-generated/src/objects/allocation-site-tq-inl.inc"
 
-NEVER_READ_ONLY_SPACE_IMPL(AllocationSite)
-
 inline Tagged<UnionOf<Smi, JSObject>>
 AllocationSite::transition_info_or_boilerplate() const {
   return transition_info_or_boilerplate_.load();
@@ -103,22 +101,12 @@ inline void AllocationSite::Initialize() {
                      SKIP_WRITE_BARRIER);
 }
 
-inline bool AllocationSite::IsZombie() const {
-  return pretenure_decision() == kZombie;
-}
-
 inline bool AllocationSite::IsMaybeTenure() const {
   return pretenure_decision() == kMaybeTenure;
 }
 
 inline bool AllocationSite::PretenuringDecisionMade() const {
   return pretenure_decision() != kUndecided;
-}
-
-inline void AllocationSite::MarkZombie() {
-  DCHECK(!IsZombie());
-  Initialize();
-  set_pretenure_decision(kZombie);
 }
 
 inline ElementsKind AllocationSite::GetElementsKind() const {
@@ -129,12 +117,12 @@ inline void AllocationSite::SetElementsKind(ElementsKind kind) {
   set_transition_info(ElementsKindBits::update(transition_info(), kind));
 }
 
-inline bool AllocationSite::CanInlineCall() const {
-  return DoNotInlineBit::decode(transition_info()) == 0;
+inline bool AllocationSite::IsSpeculationDisabled() const {
+  return SpeculationDisabledBit::decode(transition_info()) == 1;
 }
 
-inline void AllocationSite::SetDoNotInlineCall() {
-  set_transition_info(DoNotInlineBit::update(transition_info(), true));
+inline void AllocationSite::SetSpeculationDisabled() {
+  set_transition_info(SpeculationDisabledBit::update(transition_info(), true));
 }
 
 inline bool AllocationSite::PointsToLiteral() const {
@@ -190,7 +178,7 @@ inline void AllocationSite::set_memento_found_count(int count) {
   int32_t value = pretenure_data(kRelaxedLoad);
   // Verify that we can count more mementos than we can possibly find in one
   // new space collection.
-  DCHECK((GetHeap()->MaxSemiSpaceSize() /
+  DCHECK((Isolate::Current()->heap()->MaxSemiSpaceSize() /
           (Heap::kMinObjectSizeInTaggedWords * kTaggedSize +
            sizeof(AllocationSiteWithWeakNext))) < MementoFoundCountBits::kMax);
   DCHECK_LT(count, MementoFoundCountBits::kMax);
@@ -207,8 +195,6 @@ inline void AllocationSite::set_memento_create_count(int count) {
 }
 
 int AllocationSite::IncrementMementoFoundCount(int increment) {
-  DCHECK(!IsZombie());
-
   int new_value = memento_found_count() + increment;
   set_memento_found_count(new_value);
   return new_value;
@@ -230,16 +216,11 @@ inline void AllocationSiteWithWeakNext::set_weak_next(
   weak_next_.store(this, value, mode);
 }
 
-inline bool AllocationMemento::IsValid() const {
-  return !allocation_site_.load()->IsZombie();
-}
-
 void AllocationMemento::set_allocation_site(Tagged<AllocationSite> value,
                                             WriteBarrierMode mode) {
   allocation_site_.store(this, value, mode);
 }
 inline Tagged<AllocationSite> AllocationMemento::GetAllocationSite() const {
-  DCHECK(IsValid());
   return allocation_site_.load();
 }
 

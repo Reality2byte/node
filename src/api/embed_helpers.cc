@@ -1,6 +1,7 @@
 #include "debug_utils-inl.h"
 #include "env-inl.h"
 #include "node.h"
+#include "node_internals.h"
 #include "node_snapshot_builder.h"
 
 using v8::Context;
@@ -127,9 +128,12 @@ CommonEnvironmentSetup::CommonEnvironmentSetup(
   if (flags & Flags::kIsForSnapshotting) {
     // The isolate must be registered before the SnapshotCreator initializes the
     // isolate, so that the memory reducer can be initialized.
-    isolate = impl_->isolate = Isolate::Allocate();
+    isolate = impl_->isolate = Isolate::Allocate(GetOrCreateIsolateGroup());
     platform->RegisterIsolate(isolate, loop);
 
+    if (snapshot_config != nullptr && snapshot_config->base_blob != nullptr) {
+      params.snapshot_blob = snapshot_config->base_blob;
+    }
     impl_->snapshot_creator.emplace(isolate, params);
     isolate->SetCaptureStackTraceForUncaughtExceptions(
         true,

@@ -21,7 +21,8 @@ const { getHeapSnapshot } = require('v8');
 
 function createJSHeapSnapshot(stream = getHeapSnapshot()) {
   stream.pause();
-  const dump = JSON.parse(stream.read());
+  stream.read(0);
+  const dump = JSON.parse(stream.read(stream.readableLength));
   const meta = dump.snapshot.meta;
 
   const nodes =
@@ -327,12 +328,25 @@ function getHeapSnapshotOptionTests() {
 }
 
 /**
- * Similar to @see {validateByRetainingPathFromNodes} but creates the snapshot from scratch.
+ * Similar to {@link validateByRetainingPathFromNodes} but creates the snapshot from scratch.
  * @returns {object[]}
  */
 function validateByRetainingPath(...args) {
   const nodes = createJSHeapSnapshot();
   return validateByRetainingPathFromNodes(nodes, ...args);
+}
+
+function getRetainingNodes(startingNode, filter) {
+  const seen = new Set();
+  function listNodes(node) {
+    if (!filter(node) || seen.has(node)) return;
+    seen.add(node);
+    for (const edge of node.incomingEdges) {
+      listNodes(edge.from);
+    }
+  }
+  listNodes(startingNode);
+  return [...seen];
 }
 
 module.exports = {
@@ -342,4 +356,5 @@ module.exports = {
   validateByRetainingPathFromNodes,
   getHeapSnapshotOptionTests,
   createJSHeapSnapshot,
+  getRetainingNodes,
 };

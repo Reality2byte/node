@@ -7,6 +7,7 @@ if (!common.hasCrypto)
 
 const {
   X509Certificate,
+  createHash,
   createPrivateKey,
   generateKeyPairSync,
   createSign,
@@ -18,7 +19,7 @@ const {
 
 const assert = require('assert');
 const fixtures = require('../common/fixtures');
-const { hasOpenSSL3 } = require('../common/crypto');
+const { hasOpenSSL, isBoringSSL } = require('../common/crypto');
 const { readFileSync } = require('fs');
 
 const cert = readFileSync(fixtures.path('keys', 'agent1-cert.pem'));
@@ -26,6 +27,42 @@ const key = readFileSync(fixtures.path('keys', 'agent1-key.pem'));
 const ca = readFileSync(fixtures.path('keys', 'ca1-cert.pem'));
 
 const privateKey = createPrivateKey(key);
+
+if (!isBoringSSL) {
+  const expectedPubkeys = hasOpenSSL(3) ? [
+    [
+      'rsa_pss_cert_2048.pem',
+      292,
+      'dff998a209bfa2e6ded1208c6e57f5b6bdedfa44b631265e3e244f38e637f6e4',
+    ],
+    [
+      'rsa_pss_cert_2048_sha256_sha256_16.pem',
+      342,
+      'da0bcd53fbe3969c7cc2730f86abc34e0e1c340264bbdfa3faf01484c2eeece0',
+    ],
+  ] : [
+    [
+      'rsa_pss_cert_2048.pem',
+      294,
+      '4d4f2f076aced4f0df922b84b466b0a60ba4cb50a23d695ae12ddc5fff7aca14',
+    ],
+    [
+      'rsa_pss_cert_2048_sha256_sha256_16.pem',
+      294,
+      'd37942c3bd02bc25c724fcd31efd647824e536c13d62d9ad0b5db8c0900d3cba',
+    ],
+  ];
+
+  for (const [name, length, digest] of expectedPubkeys) {
+    const pssCert = new X509Certificate(
+      readFileSync(fixtures.path('keys', name)));
+    const pubkey = pssCert.toLegacyObject().pubkey;
+    assert.strictEqual(pubkey.length, length);
+    assert.strictEqual(
+      createHash('sha256').update(pubkey).digest('hex'),
+      digest);
+  }
+}
 
 [1, {}, false, null].forEach((i) => {
   assert.throws(() => new X509Certificate(i), {
@@ -51,7 +88,7 @@ emailAddress=ry@tinyclouds.org`;
 
 let infoAccessCheck = `OCSP - URI:http://ocsp.nodejs.org/
 CA Issuers - URI:http://ca.nodejs.org/ca.cert`;
-if (!hasOpenSSL3)
+if (!hasOpenSSL(3))
   infoAccessCheck += '\n';
 
 const der = Buffer.from(
@@ -119,7 +156,7 @@ const der = Buffer.from(
 
   assert.deepStrictEqual(x509.raw, der);
 
-  if (!process.features.openssl_is_boringssl) {
+  if (!isBoringSSL) {
     assert.deepStrictEqual(x509.validFromDate, new Date('2022-09-03T21:40:37Z'));
     assert.deepStrictEqual(x509.validToDate, new Date('2296-06-17T21:40:37Z'));
   }
@@ -296,7 +333,7 @@ oans248kpal88CGqsN2so/wZKxVnpiXlPHMdiNL7hRSUqlHkUi07FrP2Htg8kjI=
       'OCSP - URI': ['http://ocsp.nodejs.org/'],
       'CA Issuers - URI': ['http://ca.nodejs.org/ca.cert']
     }),
-    modulusPattern: new RegExp(`^${modulusOSSL}$`, 'i'),
+    modulusPattern: new RegExp(`^${RegExp.escape(modulusOSSL)}$`, 'i'),
     bits: 2048,
     exponent: '0x10001',
     valid_from: 'Sep  3 21:40:37 2022 GMT',
@@ -362,10 +399,10 @@ tAt3hIKFD1bJt6c6WtMH2Su3syosWxmdmGk5ihslB00lvLpfj/wed8i3bkcB1doq
 UcXd/5qu2GhokrKU2cPttU+XAN2Om6a0
 -----END CERTIFICATE-----`;
 
-  if (!process.features.openssl_is_boringssl) {
+  if (!isBoringSSL) {
     const cert = new X509Certificate(certPem);
     assert.throws(() => cert.publicKey, {
-      message: hasOpenSSL3 ? /decode error/ : /wrong tag/,
+      message: hasOpenSSL(3) ? /decode error/ : /wrong tag/,
       name: 'Error'
     });
 
@@ -409,7 +446,7 @@ UidvpWWipVLZgK+oDks+bKTobcoXGW9oXobiIYqslXPy
 -----END CERTIFICATE-----`.trim();
   const c1 = new X509Certificate(certPemUTCTime);
 
-  if (!process.features.openssl_is_boringssl) {
+  if (!isBoringSSL) {
     assert.deepStrictEqual(c1.validFromDate, new Date('1949-12-25T23:59:58Z'));
     assert.deepStrictEqual(c1.validToDate, new Date('1950-01-01T23:59:58Z'));
   }
@@ -446,7 +483,7 @@ CWwQO8JZjJqFtqtuzy2n+gLCvqePgG/gmSqHOPm2ZbLW
 -----END CERTIFICATE-----`.trim();
   const c2 = new X509Certificate(certPemGeneralizedTime);
 
-  if (!process.features.openssl_is_boringssl) {
+  if (!isBoringSSL) {
     assert.deepStrictEqual(c2.validFromDate, new Date('2049-12-26T00:00:01Z'));
     assert.deepStrictEqual(c2.validToDate, new Date('2050-01-02T00:00:01Z'));
   }

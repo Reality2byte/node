@@ -142,46 +142,56 @@ CommonJS. This includes the following:
 * Lexical redeclarations of the CommonJS wrapper variables (`require`, `module`,
   `exports`, `__dirname`, `__filename`).
 
-### Modules loaders
+### Module resolution and loading
 
-Node.js has two systems for resolving a specifier and loading modules.
+Node.js has two types of module resolution and loading, chosen based on how the module is requested.
 
-There is the CommonJS module loader:
+When a module is requested via `require()` (available by default in CommonJS modules,
+and can be dynamically generated using `createRequire()` in both CommonJS and ES Modules):
 
-* It is fully synchronous.
-* It is responsible for handling `require()` calls.
-* It is monkey patchable.
-* It supports [folders as modules][].
-* When resolving a specifier, if no exact match is found, it will try to add
-  extensions (`.js`, `.json`, and finally `.node`) and then attempt to resolve
-  [folders as modules][].
-* It treats `.json` as JSON text files.
-* `.node` files are interpreted as compiled addon modules loaded with
-  `process.dlopen()`.
-* It treats all files that lack `.json` or `.node` extensions as JavaScript
-  text files.
-* It can only be used to [load ECMAScript modules from CommonJS modules][] if
-  the module graph is synchronous (that contains no top-level `await`).
-  When used to load a JavaScript text file that is not an ECMAScript module,
-  the file will be loaded as a CommonJS module.
+* Resolution:
+  * The resolution initiated by `require()` supports [folders as modules][].
+  * When resolving a specifier, if no exact match is found, `require()` will try to add
+    extensions (`.js`, `.json`, and finally `.node`) and then attempt to resolve
+    [folders as modules][].
+  * It does not support URLs as specifiers by default.
+* Loading:
+  * `.json` files are treated as JSON text files.
+  * `.node` files are interpreted as compiled addon modules loaded with `process.dlopen()`.
+  * `.ts`, `.mts` and `.cts` files are treated as [TypeScript][] text files.
+  * Files with any other extension, or without extensions, are treated as JavaScript
+    text files.
+  * `require()` can only be used to [load ECMAScript modules from CommonJS modules][] if
+    the [ECMAScript module][ES Module] _and its dependencies_ are synchronous
+    (i.e. they do not contain top-level `await`).
 
-There is the ECMAScript module loader:
+When a module is requested via static `import` statements (only available in ES Modules)
+or `import()` expressions (available in both CommonJS and ES Modules):
 
-* It is asynchronous, unless it's being used to load modules for `require()`.
-* It is responsible for handling `import` statements and `import()` expressions.
-* It is not monkey patchable, can be customized using [loader hooks][].
-* It does not support folders as modules, directory indexes (e.g.
-  `'./startup/index.js'`) must be fully specified.
-* It does no extension searching. A file extension must be provided
-  when the specifier is a relative or absolute file URL.
-* It can load JSON modules, but an import type attribute is required.
-* It accepts only `.js`, `.mjs`, and `.cjs` extensions for JavaScript text
-  files.
-* It can be used to load JavaScript CommonJS modules. Such modules
-  are passed through the `cjs-module-lexer` to try to identify named exports,
-  which are available if they can be determined through static analysis.
-  Imported CommonJS modules have their URLs converted to absolute
-  paths and are then loaded via the CommonJS module loader.
+* Resolution:
+  * The resolution of `import`/`import()` does not support folders as modules,
+    directory indexes (e.g. `'./startup/index.js'`) must be fully specified.
+  * It does not perform extension searching. A file extension must be provided
+    when the specifier is a relative or absolute file URL.
+  * It supports `file://` and `data:` URLs as specifiers by default.
+* Loading:
+  * `.json` files are treated as JSON text files. When importing JSON modules,
+    an import type attribute is required (e.g.
+    `import json from './data.json' with { type: 'json' }`).
+  * `.node` files are interpreted as compiled addon modules loaded with
+    `process.dlopen()`, if [`--experimental-addon-modules`][] is enabled.
+  * `.ts`, `.mts` and `.cts` files are treated as [TypeScript][] text files.
+  * It accepts only `.js`, `.mjs`, and `.cjs` extensions for JavaScript text
+    files.
+  * `.wasm` files are treated as [WebAssembly modules][].
+  * Any other file extensions will result in a  [`ERR_UNKNOWN_FILE_EXTENSION`][] error.
+    Additional file extensions can be facilitated via [customization hooks][].
+  * `import`/`import()` can be used to load JavaScript [CommonJS modules][commonjs].
+    Such modules are passed through [merve][] to try to identify named
+    exports, which are available if they can be determined through static analysis.
+
+Regardless of how a module is requested, the resolution and loading process can be customized
+using [customization hooks][].
 
 ### `package.json` and file extensions
 
@@ -517,6 +527,12 @@ can be written:
 added:
   - v14.6.0
   - v12.19.0
+changes:
+  - version:
+     - v25.4.0
+     - v24.14.0
+    pr-url: https://github.com/nodejs/node/pull/60864
+    description: Allow subpath imports that start with `#/`.
 -->
 
 In addition to the [`"exports"`][] field, there is a package `"imports"` field
@@ -606,7 +622,7 @@ import featureY from 'es-module-package/features/y/y.js';
 // Loads ./node_modules/es-module-package/src/features/y/y.js
 
 import internalZ from '#internal/z.js';
-// Loads ./node_modules/es-module-package/src/internal/z.js
+// Loads ./src/internal/z.js
 ```
 
 This is a direct static matching and replacement without any special handling
@@ -784,7 +800,7 @@ Any number of custom conditions can be set with repeat flags.
 
 Typical conditions should only contain alphanumerical characters,
 using ":", "-", or "=" as separators if necessary. Anything else may run
-into compability issues outside of node.
+into compatibility issues outside of node.
 
 In node, conditions have very few restrictions, but specifically these include:
 
@@ -931,6 +947,194 @@ $ node other.js
 
 See [the package examples repository][] for details.
 
+## Package maps
+
+<!-- YAML
+added:
+ - v26.4.0
+ - v24.20.0
+-->
+
+> Stability: 1 - Experimental. Enable this API with [`--experimental-package-map`][].
+
+Package maps provide a mechanism to control package resolution without relying
+on the `node_modules` folder structure. When enabled via the
+[`--experimental-package-map`][] flag, Node.js uses a JSON configuration file
+to determine how bare specifiers are resolved.
+
+This feature is useful for:
+
+* **Monorepos**: Define explicit dependency relationships between workspace
+  packages without symlinks or hoisting complexities.
+* **Dependency isolation**: Prevent packages from accessing undeclared
+  dependencies (phantom dependencies).
+* **Low file system coupling**: The package resolution algorithm runs without
+  inspecting the file system, relying instead on static data tables.
+
+### Configuration file format
+
+The package map configuration file is a JSON file with a `packages` object.
+Each key in `packages` is called a package ID and is a unique identifier for a package entry:
+
+```json
+{
+  "packages": {
+    "app": {
+      "url": "./packages/app",
+      "dependencies": {
+        "@myorg/utils": "utils",
+        "@myorg/ui-lib": "ui-lib"
+      }
+    },
+    "utils": {
+      "url": "./packages/utils"
+    },
+    "ui-lib": {
+      "url": "./packages/ui-lib",
+      "dependencies": {
+        "@myorg/utils": "utils"
+      }
+    }
+  }
+}
+```
+
+Each package entry has the following fields:
+
+* `url` {string} **Required.** An absolute or relative URL. This is parsed using
+  the WHATWG [`URL`][] API, using the configuration file URL as base. Only
+  `file:` protocol is supported. Multiple packages are allowed to share the
+  same URL; consumers must key module instances by both module url **and package IDs**
+  to differentiate them.
+* `dependencies` {Object} An object mapping bare specifiers to package keys.
+  Each key is the import name used in source code, and each value is the
+  corresponding package key in the `packages` object. Defaults to an empty
+  object.
+
+### Resolution algorithm
+
+When a bare specifier is encountered:
+
+1. Node.js determines which package performs the resolution request.
+   * If possible the package ID for the importer file should be provided to the resolution algorithm.
+   * Failing that, the resolution will check if the file path is within any
+     package location decoded from its `url`.
+2. If no package ID is provided and the importing file is not within any mapped package, an
+   [`ERR_PACKAGE_MAP_EXTERNAL_FILE`][] error is thrown.
+3. Node.js looks up the specifier's package name in the importing package's
+   `dependencies` object to find the corresponding package key.
+4. If found, the resolution algorithm locates the target package location from the
+   package's `url` field in the package map.
+5. If the specifier is not in `dependencies`, a
+   `MODULE_NOT_FOUND` error is thrown.
+6. The package location is forwarded to the regular Node.js resolution algorithm to
+   finish the resolution (`index.js`, exports field, etc).
+
+More details can be found in the [resolution algorithm pseudo-code][].
+
+### Multiple package versions
+
+Different packages can depend on different versions of the same package.
+Because `dependencies` maps bare specifiers to package keys, two packages
+can map the same specifier to different targets:
+
+```json
+{
+  "packages": {
+    "app": {
+      "url": "./app",
+      "dependencies": {
+        "component": "component-v2"
+      }
+    },
+    "legacy": {
+      "url": "./legacy",
+      "dependencies": {
+        "component": "component-v1"
+      }
+    },
+    "component-v1": {
+      "url": "./vendor/component-1.0.0"
+    },
+    "component-v2": {
+      "url": "./vendor/component-2.0.0"
+    }
+  }
+}
+```
+
+Both `app` and `legacy` can `import 'component'`, but they resolve to
+different paths based on their declared dependencies.
+
+### Multiple packages for the same URL
+
+To address complex hoisting situations, multiple packages may share the same
+URL, which introduces ambiguity when determining which package an import
+originates from:
+
+```json
+{
+  "packages": {
+    "app-old": {
+      "url": "./app-old",
+      "dependencies": {
+        "lib": "lib-old"
+      }
+    },
+    "app-new": {
+      "url": "./app-new",
+      "dependencies": {
+        "lib": "lib-new"
+      }
+    },
+    "lib-old": {
+      "url": "./lib",
+      "dependencies": {
+        "react": "react-15"
+      }
+    },
+    "lib-new": {
+      "url": "./lib",
+      "dependencies": {
+        "react": "react-18"
+      }
+    }
+  }
+}
+```
+
+In the example above both `lib-old` and `lib-new` use the same `./lib` folder to
+store their sources, the only difference being in which version of `react` they'll
+access when performing `require` calls or using `import`.
+
+Because multiple package entries share the same URL, resolving a bare specifier
+from a file within that URL is ambiguous unless the originating package ID is
+known. If the package ID cannot be determined (for example, because the caller
+did not propagate it from a previous resolution), Node.js will throw an error
+rather than guess.
+
+To support this pattern, implementers must key module instances by package ID
+and propagate it from each resolution result to subsequent resolution requests.
+This ensures that when `lib` requires `react`, the runtime knows whether the
+request comes from `lib-old` or `lib-new` and can select the correct dependency.
+
+### Interaction with other resolution
+
+Package maps only apply to bare specifiers that are not Node.js builtin
+modules. The following cases are not affected by package maps and continue
+to use standard resolution:
+
+* Relative paths or URLs (`./` or `../`).
+* Absolute paths or URLs.
+* Node.js builtin modules (`node:fs`, etc.).
+
+### Limitations
+
+* Package maps must be a single static file; dynamic configuration is not
+  supported.
+* Circular dependency detection is not performed by the package map resolver.
+* The package map file is loaded synchronously at startup.
+
 ## Node.js `package.json` field definitions
 
 This section describes the fields used by the Node.js runtime. Other tools (such
@@ -996,7 +1200,7 @@ added: v0.4.0
 The `"main"` field defines the entry point of a package when imported by name
 via a `node_modules` lookup.  Its value is a path.
 
-When a package has an [`"exports"`][] field, this will take precedence over the
+The [`"exports"`][] field, if it exists, takes precedence over the
 `"main"` field when importing the package by name.
 
 It also defines the script that is used when the [package directory is loaded
@@ -1151,6 +1355,8 @@ This field defines [subpath imports][] for the current package.
 [Node.js documentation for this section]: https://github.com/nodejs/node/blob/HEAD/doc/api/packages.md#conditions-definitions
 [Runtime Keys]: https://runtime-keys.proposal.wintercg.org/
 [Syntax detection]: #syntax-detection
+[TypeScript]: typescript.md
+[WebAssembly modules]: esm.md#wasm-modules
 [WinterCG]: https://wintercg.org/
 [`"exports"`]: #exports
 [`"imports"`]: #imports
@@ -1158,15 +1364,22 @@ This field defines [subpath imports][] for the current package.
 [`"name"`]: #name
 [`"type"`]: #type
 [`--conditions` / `-C` flag]: #resolving-user-conditions
+[`--experimental-addon-modules`]: cli.md#--experimental-addon-modules
+[`--experimental-package-map`]: cli.md#--experimental-package-mappath
 [`--no-addons` flag]: cli.md#--no-addons
+[`ERR_PACKAGE_MAP_EXTERNAL_FILE`]: errors.md#err_package_map_external_file
 [`ERR_PACKAGE_PATH_NOT_EXPORTED`]: errors.md#err_package_path_not_exported
+[`ERR_UNKNOWN_FILE_EXTENSION`]: errors.md#err_unknown_file_extension
+[`URL`]: url.md#the-whatwg-url-api
 [`package.json`]: #nodejs-packagejson-field-definitions
+[customization hooks]: module.md#customization-hooks
 [entry points]: #package-entry-points
 [folders as modules]: modules.md#folders-as-modules
 [import maps]: https://github.com/WICG/import-maps
 [load ECMAScript modules from CommonJS modules]: modules.md#loading-ecmascript-modules-using-require
-[loader hooks]: esm.md#loaders
+[merve]: https://github.com/anonrig/merve
 [packages folder mapping]: https://github.com/WICG/import-maps#packages-via-trailing-slashes
+[resolution algorithm pseudo-code]: modules.md#all-together
 [self-reference]: #self-referencing-a-package-using-its-name
 [subpath exports]: #subpath-exports
 [subpath imports]: #subpath-imports

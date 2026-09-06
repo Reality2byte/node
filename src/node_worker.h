@@ -8,6 +8,7 @@
 #include "json_utils.h"
 #include "node_exit_code.h"
 #include "node_messaging.h"
+#include "util.h"
 #include "uv.h"
 
 namespace node {
@@ -41,6 +42,7 @@ class Worker : public AsyncWrap {
 
   // Run the worker. This is only called from the worker thread.
   void Run();
+  bool UseWorkerContextSnapshot() const;
 
   // Forcibly exit the thread with a specified exit code. This may be called
   // from any thread. `error_code` and `error_message` can be used to create
@@ -66,9 +68,6 @@ class Worker : public AsyncWrap {
   std::string_view name() const { return name_; }
 
   static void New(const v8::FunctionCallbackInfo<v8::Value>& args);
-  static void CloneParentEnvVars(
-      const v8::FunctionCallbackInfo<v8::Value>& args);
-  static void SetEnvVars(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void StartThread(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void StopThread(const v8::FunctionCallbackInfo<v8::Value>& args);
   static void HasRef(const v8::FunctionCallbackInfo<v8::Value>& args);
